@@ -1,8 +1,6 @@
 # cpn-py features user guide (since 30528abf)
 
-This guide covers **user-facing features** added from commit `30528abf` onward: new CPN modeling capabilities, script simulation helpers, and the interactive Streamlit visualizer. It explains **what you can do and how**, not internal rerun mechanics.
-
-For developer/refactoring notes on the Streamlit visualizer, see [Streamlit visualizer simplification patterns](docs/solutions/architecture-patterns/streamlit-visualizer-simplification-patterns.md).
+This guide covers **user-facing features** added from commit `30528abf` onward: new CPN modeling capabilities, script simulation helpers, and the interactive Streamlit visualizer. It explains **what you can do and how**.
 
 ## Quick start
 
@@ -147,7 +145,7 @@ If a guard raises an exception, the transition is treated as disabled and its na
 
 ### Net validation before simulation
 
-Creating `CPNStreamlitVisualizer(cpn, marking, ...)` runs validation (`raise_if_invalid_net`): duplicate names, invalid initial tokens, bad arc syntax, unbound variables, etc. Errors appear in the main-area status panel before you can fire.
+Creating `CPNStreamlitVisualizer(cpn, marking, ...)` runs validation (`raise_if_invalid_net`): duplicate names, invalid initial tokens, bad arc syntax, unbound variables, etc. Validation failures raise before the visualizer mounts; later simulation errors appear as overlay notifications on the graph.
 
 ---
 
@@ -181,7 +179,7 @@ Prints step/time progress to stdout. Does not drive the Streamlit graph.
 
 ## Part 3 — Streamlit visualizer UI map
 
-The demo opens with a **sidebar** (controls) on the left and the **interactive graph** on the right. Status messages appear in the main column above the graph when simulation events occur (errors, batch completion, monitor pause).
+The demo opens with a **sidebar** (controls) on the left and the **interactive graph** on the right. Status notifications overlay the graph canvas when simulation events occur (errors, batch completion, monitor pause).
 
 ![CPN-py Streamlit demo — initial load](docs/images/streamlit-demo-ui.png)
 
@@ -194,13 +192,13 @@ The demo opens with a **sidebar** (controls) on the left and the **interactive g
 | 1 | **Metrics** (sidebar top) | `Clock`, `Firings`, `Enabled` | Live simulation stats in monospace text |
 | 2 | **Animation duration** | Number input (default 500 ms) | Length of firing animations (Fire / animated batch) |
 | 3 | **Step / Batch** | Two panel buttons | Switch between manual step mode and automated batch mode |
-| 4 | **Monitors** | Named toggles with **On** | Enable/disable breakpoints registered in code |
+| 4 | **Monitors** | Status circle + named toggles with **On** | Empty/green circle = idle/triggered; **On** enables/disables breakpoints |
 | 5 | **Step controls** | Checkbox, transition selectbox, **Fire** | Manual firing (visible when Step panel is active) |
 | 6 | **Reset** | **Reset to initial state** | Restore initial marking and clear pause/status state |
 | 7 | **Layout** | Strategy, spacing, fit/reset/export/import | Control graph arrangement and persistence |
 | 8 | **Tips** | Collapsed expander | Built-in cheat sheet |
 | 9 | **Graph** (main area) | vis-network canvas | Places (ellipses), transitions (boxes), arcs, token badges |
-| 10 | **Status** (main area, above graph) | Bordered banner with × dismiss | Errors, batch results, monitor pause — appears when relevant |
+| 10 | **Status overlay** (on graph) | Floating banners with × dismiss | Errors, batch results, monitor pause — appear on the canvas when relevant |
 
 ### Sidebar — top to bottom
 
@@ -221,7 +219,7 @@ Click **Step** or **Batch** at the top of the control stack. The active panel is
 
 #### Monitors (visible in screenshot)
 
-Each registered monitor shows its name, timing (**Before** / **After**), optional transition filter, and an **On** toggle. The demo ships with:
+Each registered monitor shows a status circle (empty / green when triggered), its name, timing (**Before** / **After**), optional transition filter, and an **On** toggle. The demo ships with:
 
 - **T_Increment enabled (Before) · T_Increment** — pauses whenever `T_Increment` is about to fire
 - **Clock ≥ 5 (Before)** — pauses when global clock reaches 5
@@ -292,7 +290,7 @@ Slider **Animation duration (ms)** — 50–5000, default 500. Controls how long
 
 **Fast batch (no animation):** Runs several steps per page refresh so the UI stays responsive; **Stop** remains clickable between chunks.
 
-**After batch finishes:** Status appears in the main **Status** area (e.g. Finished, Deadlock, Stopped).
+**After batch finishes:** Status overlays the graph (e.g. Finished, Deadlock, Stopped).
 
 ### Reset
 
@@ -327,9 +325,9 @@ viz.register_monitor(
 | `transition_name` | Only evaluate when that transition is in the enabled set |
 | `default_enabled` | Initial On/Off state for the toggle |
 
-**Monitors panel:** Each registered monitor has an **On** toggle. Turn off to skip that monitor without removing it from code.
+**Monitors panel:** Each registered monitor has an **On** toggle and a status circle to its left (empty when idle, **green** when that monitor caused the current pause). Turn off to skip that monitor without removing it from code.
 
-**When a monitor fires:** Simulation stops with a status like `Stopped (monitors: Clock >= 5)`. Batch mode pauses the same way.
+**When a monitor fires:** Simulation pauses. The sidebar circle for that monitor turns green, and the graph overlay shows `Monitors triggered: …`. Batch mode pauses the same way.
 
 **Resume:** Click **Fire selected transition** (Step tab) or **Start batch** again. The next action skips monitor checks **once**, then monitors stay active. You do not need to disable monitors to continue.
 
@@ -337,13 +335,13 @@ The demo registers `"T_Increment enabled"` (always true before `T_Increment`) an
 
 ---
 
-## Part 5 — Status messages (main area)
+## Part 5 — Status messages (graph overlay)
 
-Important messages appear **above the graph** in a bordered Status section (not buried in the sidebar):
+Important messages appear as a **floating stack on the graph canvas** (not above the iframe, so the graph does not jump during animation):
 
 | Message type | Typical cause |
 |--------------|---------------|
-| Error (red) | Simulation exception, invalid net |
+| Error (red) | Simulation exception, invalid layout import |
 | Warning (yellow) | User stopped batch, manual stop |
 | Success (green) | Batch finished, monitor pause |
 | Info (blue) | Deadlock notice, general info |

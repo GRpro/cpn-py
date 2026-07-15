@@ -81,6 +81,55 @@
                     font-family: sans-serif; font-size: 13px;
                     z-index: 100;
                 }
+                #notifications {
+                    position: absolute;
+                    top: 10px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    width: min(520px, calc(100% - 24px));
+                    z-index: 120;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                    pointer-events: none;
+                }
+                .cpn-notify {
+                    pointer-events: auto;
+                    display: flex;
+                    gap: 8px;
+                    align-items: flex-start;
+                    padding: 10px 12px;
+                    border-radius: 8px;
+                    border: 1px solid #ddd;
+                    background: rgba(255,255,255,0.96);
+                    box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+                    font: 13px/1.35 Arial, sans-serif;
+                    color: #222;
+                }
+                .cpn-notify-body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+                .cpn-notify-close {
+                    cursor: pointer;
+                    color: #888;
+                    font-size: 16px;
+                    line-height: 1;
+                    padding: 0 2px;
+                    user-select: none;
+                }
+                .cpn-notify-close:hover { color: #333; }
+                .cpn-notify-error { border-color: #f1aeb5; background: rgba(255,235,238,0.97); }
+                .cpn-notify-warning { border-color: #ffe08a; background: rgba(255,249,230,0.97); }
+                .cpn-notify-success { border-color: #9dd4b1; background: rgba(232,246,237,0.97); }
+                .cpn-notify-info { border-color: #b6d4fe; background: rgba(232,241,255,0.97); }
+                .cpn-notify details { margin-top: 4px; }
+                .cpn-notify pre {
+                    margin: 6px 0 0;
+                    max-height: 180px;
+                    overflow: auto;
+                    background: #f4f4f4;
+                    padding: 8px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                }
                 .overlay-header {
                     font-weight: bold; border-bottom: 1px solid #eee;
                     padding-bottom: 6px; margin-bottom: 10px;
@@ -97,6 +146,7 @@
                 <div id="mynetwork"></div>
                 <div id="graph-status">Loading graph…</div>
                 <div id="labels-container"></div>
+                <div id="notifications"></div>
             </div>
             <div id="overlay">
                 <div class="overlay-header">
@@ -484,6 +534,58 @@
                     if (status) status.style.display = 'none';
                 }
 
+                function escapeHtml(text) {
+                    return String(text)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                }
+
+                function dismissNotification(id) {
+                    try {
+                        window.parent.postMessage({
+                            isStreamlitMessage: true,
+                            type: "streamlit:setComponentValue",
+                            value: JSON.stringify({ type: "dismiss_status", id: id }),
+                            dataType: "json",
+                        }, "*");
+                    } catch (e) {}
+                }
+
+                function renderNotifications(notifications) {
+                    const root = document.getElementById('notifications');
+                    if (!root) return;
+                    root.innerHTML = '';
+                    (notifications || []).forEach(n => {
+                        const level = n.level || 'info';
+                        const card = document.createElement('div');
+                        card.className = 'cpn-notify cpn-notify-' + level;
+                        const body = document.createElement('div');
+                        body.className = 'cpn-notify-body';
+                        if (n.kind === 'traceback') {
+                            body.innerHTML =
+                                '<details><summary>Error details</summary><pre>' +
+                                escapeHtml(n.message || '') +
+                                '</pre></details>';
+                        } else {
+                            body.textContent = n.message || '';
+                        }
+                        const closeBtn = document.createElement('span');
+                        closeBtn.className = 'cpn-notify-close';
+                        closeBtn.setAttribute('title', 'Dismiss');
+                        closeBtn.textContent = '×';
+                        closeBtn.onclick = (ev) => {
+                            ev.stopPropagation();
+                            dismissNotification(n.id);
+                        };
+                        card.appendChild(body);
+                        card.appendChild(closeBtn);
+                        root.appendChild(card);
+                    });
+                }
+
                 function runGraph(graphData, height) {
                 const anim = graphData.animation || {};
                 const TOKEN_DURATION = anim.phase_ms || 200;
@@ -495,6 +597,7 @@
                 const statusEl = document.getElementById('graph-status');
                 container.innerHTML = '';
                 labelsContainer.innerHTML = '';
+                renderNotifications(graphData.notifications);
                 if (statusEl) {
                     statusEl.style.display = 'block';
                     statusEl.textContent = 'Loading graph…';

@@ -2,6 +2,7 @@ import copy
 import json
 import time
 import traceback
+from html import escape as html_escape
 from typing import Callable
 
 import streamlit as st
@@ -42,7 +43,9 @@ from cpnpy.visualization.visualizer_st_helpers import (
     GUARD_EXTERNAL_MAX_LEN,
     GUARD_EXTERNAL_MAX_LEN_LARGE,
     monitor_batch_status_message,
+    monitor_trigger_indicator,
     normalize_animation_arcs,
+    normalize_batch_flags,
     PLACE_LABEL_FONT_SIZE_PX,
     raise_if_invalid_net,
     apply_imported_positions,
@@ -50,9 +53,10 @@ from cpnpy.visualization.visualizer_st_helpers import (
     build_layout_file_payload,
     clear_status_dismiss,
     graph_layout_storage_key,
-    is_status_dismissed,
     parse_layout_file_json,
+    show_continuation_decision,
     slugify_monitor_name,
+    visible_status_notifications,
 )
 
 _LAYOUT_STRATEGY_LABELS = ("Force", "Flow LR", "Cluster", "Layered LR")
@@ -97,18 +101,13 @@ class CPNStreamlitVisualizer:
       show    — display firing animation, then return to advance
     """
 
-    _STATUS_LEVEL_ORDER = ("error", "warning", "success", "info")
-    _STATUS_WIDGETS = {
-        "error": st.error,
-        "warning": st.warning,
-        "success": st.success,
-        "info": st.info,
-    }
-
     def __init__(self, cpn: CPN, marking: Marking,
                  context: EvaluationContext | None = None,
                  session_key: str = "cpn_marking"):
-        raise_if_invalid_net(cpn, marking)
+        validated_key = f"{session_key}_net_validated"
+        if not st.session_state.get(validated_key):
+            raise_if_invalid_net(cpn, marking)
+            st.session_state[validated_key] = True
         self.cpn = cpn
         self.context = context or EvaluationContext()
         self.session_key = session_key
@@ -212,12 +211,7 @@ class CPNStreamlitVisualizer:
             return
         triggered = set(st.session_state.get(self._k("monitors_triggered"), []))
         with st.container(border=True):
-            st.markdown("**Monitors**")
-            if triggered:
-                st.caption(
-                    "Paused — use Fire or Start batch to continue "
-                    "(monitors stay enabled)."
-                )
+            self._panel_header("Monitors")
             for m in self._monitors:
                 widget_key = self._monitor_widget_key(m.slug)
                 if widget_key not in st.session_state:
@@ -226,12 +220,13 @@ class CPNStreamlitVisualizer:
                 label = f"{m.name} ({phase})"
                 if m.transition_name:
                     label += f" · {m.transition_name}"
-                if m.name in triggered:
-                    label += " — triggered"
                 col_label, col_toggle = st.columns([4, 2])
                 with col_label:
-                    prefix = "▶ " if m.name in triggered else ""
-                    st.markdown(f"{prefix}**{label}**")
+                    dot = monitor_trigger_indicator(m.name in triggered)
+                    st.markdown(
+                        f'{dot}<strong>{html_escape(label)}</strong>',
+                        unsafe_allow_html=True,
+                    )
                 with col_toggle:
                     st.toggle(
                         "On",
@@ -248,12 +243,21 @@ class CPNStreamlitVisualizer:
         return f"{self.session_key}_{suffix}"
 
     def _record_sim_error(self, exc: BaseException) -> None:
-        st.session_state[self._k("sim_error")] = format_simulation_error(exc)
-        st.session_state[self._k("sim_error_trace")] = traceback.format_exc()
+        st.session_state[self._k("sim_error")] = {
+            "message": format_simulation_error(exc),
+            "trace": traceback.format_exc(limit=20),
+        }
 
     def _clear_sim_error(self) -> None:
         st.session_state.pop(self._k("sim_error"), None)
-        st.session_state.pop(self._k("sim_error_trace"), None)
+
+    def _sim_error_message(self) -> str | None:
+        error = st.session_state.get(self._k("sim_error"))
+        if isinstance(error, dict):
+            return error.get("message")
+        if isinstance(error, str):
+            return error
+        return None
 
     def _notify(
         self,
@@ -261,11 +265,14 @@ class CPNStreamlitVisualizer:
         *,
         level: str = "info",
         dedup_id: str | None = None,
+        kind: str | None = None,
     ) -> None:
-        """Persist a status line for the main status banner (survives reruns until cleared)."""
+        """Persist a status notification for the graph overlay (survives reruns until cleared)."""
         store = st.session_state.setdefault(self._k("status_messages"), {})
         key = dedup_id or f"_{len(store)}"
         entry = {"message": message, "level": level}
+        if kind:
+            entry["kind"] = kind
         if store.get(key) == entry:
             return
         store[key] = entry
@@ -308,17 +315,19 @@ class CPNStreamlitVisualizer:
 
         error = st.session_state.get(self._k("sim_error"))
         if error:
+            message = error.get("message") if isinstance(error, dict) else error
             self._notify(
-                f"Simulation error — {error}",
+                f"Simulation error — {message}",
                 level="error",
                 dedup_id="sim_error",
             )
-            trace = st.session_state.get(self._k("sim_error_trace"))
+            trace = error.get("trace") if isinstance(error, dict) else None
             if trace:
                 self._notify(
                     trace,
                     level="error",
                     dedup_id="sim_error_trace",
+                    kind="traceback",
                 )
         else:
             self._clear_status_slot("sim_error")
@@ -347,47 +356,11 @@ class CPNStreamlitVisualizer:
         else:
             self._clear_status_slot("batch_status")
 
-    def _render_status_messages(self) -> None:
-        store = st.session_state.get(self._k("status_messages"))
-        if not store:
-            return
-        dismissed = st.session_state.get(self._k("status_dismissed"), {})
-        level_rank = {
-            level: index for index, level in enumerate(self._STATUS_LEVEL_ORDER)
-        }
-        visible: list[tuple[str, str, str]] = []
-        for dedup_id, item in store.items():
-            message = item["message"]
-            if is_status_dismissed(dedup_id, message, dismissed):
-                continue
-            level = item.get("level", "info")
-            if level not in self._STATUS_WIDGETS:
-                level = "info"
-            visible.append((dedup_id, level, message))
-        if not visible:
-            return
-        visible.sort(
-            key=lambda row: (level_rank.get(row[1], len(level_rank)), row[0]),
+    def _graph_notifications(self) -> list[dict]:
+        return visible_status_notifications(
+            st.session_state.get(self._k("status_messages")),
+            st.session_state.get(self._k("status_dismissed"), {}),
         )
-        with st.container(border=True):
-            st.markdown("**Status**")
-            for dedup_id, level, message in visible:
-                col_msg, col_btn = st.columns([12, 1], vertical_alignment="center")
-                with col_msg:
-                    if level == "error" and message.startswith("Traceback"):
-                        with st.expander("Error details", expanded=False):
-                            st.code(message, language="text")
-                    else:
-                        widget = self._STATUS_WIDGETS.get(level, st.info)
-                        widget(message)
-                with col_btn:
-                    st.button(
-                        "×",
-                        key=self._k(f"status_dismiss_{dedup_id}"),
-                        on_click=self._dismiss_status,
-                        args=(dedup_id,),
-                        help="Dismiss this message",
-                    )
 
     def _init_session_defaults(self):
         if self._k("step_count") not in st.session_state:
@@ -446,14 +419,19 @@ class CPNStreamlitVisualizer:
             )
 
     def _repair_batch_session(self) -> None:
-        """Clear stale batch-running flags left by interrupted reruns or old sessions."""
-        phase = st.session_state.get(self._k("batch_phase"), "idle")
-        if phase != "idle":
-            return
-        if st.session_state.get(self._k("batch_running")):
-            st.session_state[self._k("batch_running")] = False
-        if st.session_state.get(self._k("batch_status")) == "Running":
-            st.session_state[self._k("batch_status")] = "Idle"
+        """Enforce batch flag invariants so Reset cannot stick after finish."""
+        running, phase, status = normalize_batch_flags(
+            batch_running=bool(st.session_state.get(self._k("batch_running"), False)),
+            batch_phase=st.session_state.get(self._k("batch_phase"), "idle"),
+            batch_status=st.session_state.get(self._k("batch_status"), "Idle"),
+        )
+        st.session_state[self._k("batch_running")] = running
+        st.session_state[self._k("batch_phase")] = phase
+        st.session_state[self._k("batch_status")] = status
+        if not running:
+            st.session_state[self._k("batch_stop_requested")] = False
+            st.session_state.pop(self._k("show_sleep_complete"), None)
+            st.session_state.pop(self._k("show_frame_painted"), None)
 
     def _apply_graph_transition_pick(self, enabled_names: list[str]) -> None:
         """Apply transition chosen on the graph before the selectbox is drawn."""
@@ -714,17 +692,25 @@ class CPNStreamlitVisualizer:
     @staticmethod
     def _parse_graph_component_value(
         raw: str | None,
-    ) -> tuple[str | None, dict | None]:
+    ) -> tuple[str | None, dict | None, str | None]:
+        """Return (transition_pick, layout_payload, dismiss_status_id)."""
         if not raw:
-            return None, None
+            return None, None, None
         if raw.startswith("{"):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                return None, None
-            if isinstance(data, dict) and data.get("type") == "layout":
-                return None, data
-        return raw, None
+                return None, None, None
+            if isinstance(data, dict):
+                kind = data.get("type")
+                if kind == "layout":
+                    return None, data, None
+                if kind == "dismiss_status":
+                    dismiss_id = data.get("id")
+                    if isinstance(dismiss_id, str) and dismiss_id:
+                        return None, None, dismiss_id
+                    return None, None, None
+        return raw, None, None
 
     def _handle_graph_layout_sync(self, layout: dict) -> None:
         positions = layout.get("positions")
@@ -751,7 +737,8 @@ class CPNStreamlitVisualizer:
         try:
             imported = parse_layout_file_json(uploaded.getvalue().decode("utf-8"))
         except ValueError as exc:
-            st.error(str(exc))
+            self._notify(str(exc), level="error", dedup_id="layout_import")
+            st.session_state[self._k("layout_import_digest")] = digest
             return
         node_ids = self._graph_node_ids()
         existing = st.session_state.get(self._k("graph_layout_positions"))
@@ -762,7 +749,11 @@ class CPNStreamlitVisualizer:
         st.session_state[self._k("prefer_saved_layout")] = True
         st.session_state[self._k("layout_import_digest")] = digest
         applied = sum(1 for nid in node_ids if nid in imported)
-        st.success(f"Imported positions for {applied} node(s).")
+        self._notify(
+            f"Imported positions for {applied} node(s).",
+            level="success",
+            dedup_id="layout_import",
+        )
 
     def _prepare_data(self, enabled_names: list[str],
                       animate_in: list[dict] | None = None,
@@ -830,6 +821,7 @@ class CPNStreamlitVisualizer:
                 self._active_sidebar_panel(self._batch_running()) == "manual"
                 and bool(enabled_names)
             ),
+            "notifications": self._graph_notifications(),
         }
         if st.session_state.pop(self._k("clear_graph_layout"), False):
             payload["clear_saved_layout"] = True
@@ -975,7 +967,7 @@ class CPNStreamlitVisualizer:
         if result == "stopped":
             return "Stopped"
         if result == "error":
-            err = st.session_state.get(self._k("sim_error"), "unknown error")
+            err = self._sim_error_message() or "unknown error"
             return f"Error — {err}"
         if result == "deadlock":
             return f"Deadlock at time {self.marking.global_clock}"
@@ -1167,7 +1159,7 @@ class CPNStreamlitVisualizer:
             return True
 
         st.session_state[self._k("show_sleep_complete")] = True
-        st.session_state.pop(self._k("last_fired"), None)
+        # Keep last_fired until show continuation consumes it (monitor_hit / caps).
         self._request_rerun()
         return True
 
@@ -1282,7 +1274,7 @@ class CPNStreamlitVisualizer:
         enabled_names: list[str],
     ) -> None:
         with st.container(border=True):
-            st.markdown("**Step**")
+            self._panel_header("Step")
             manual_auto_advance = st.checkbox(
                 "Advance clock when idle",
                 key=self._k("manual_auto_advance"),
@@ -1331,7 +1323,7 @@ class CPNStreamlitVisualizer:
         enabled_names: list[str],
     ) -> None:
         with st.container(border=True):
-            st.markdown("**Batch**")
+            self._panel_header("Batch")
             if batch_running:
                 self._render_batch_running_summary()
             batch_params = self._render_batch_config(batch_running)
@@ -1488,25 +1480,29 @@ class CPNStreamlitVisualizer:
 
         st.session_state.pop(self._k("show_sleep_complete"), None)
 
-        last_fired = st.session_state.get(self._k("last_fired"), {})
-        if last_fired.get("monitor_hit"):
+        last_fired = st.session_state.get(self._k("last_fired"), {}) or {}
+        decision = show_continuation_decision(
+            last_fired=last_fired,
+            stop_requested=bool(st.session_state.get(self._k("batch_stop_requested"), False)),
+            batch_mode=st.session_state.get(self._k("batch_mode"), "steps"),
+            batch_max_steps=int(st.session_state.get(self._k("batch_max_steps"), 0)),
+            batch_firings=int(st.session_state.get(self._k("batch_firings"), 0)),
+            global_clock=self.marking.global_clock,
+            batch_target_time=int(st.session_state.get(self._k("batch_target_time"), 0)),
+        )
+        # Consume firing payload only after the terminal decision can see monitor_hit.
+        st.session_state.pop(self._k("last_fired"), None)
+
+        if decision == "monitor":
             self._end_batch(
                 monitor_batch_status_message(last_fired.get("monitors", [])),
                 rerun=True,
             )
             return
-
-        if st.session_state.get(self._k("batch_stop_requested")):
+        if decision == "stopped":
             self._end_batch("Stopped", rerun=True)
             return
-
-        mode = st.session_state.get(self._k("batch_mode"), "steps")
-        max_steps = int(st.session_state.get(self._k("batch_max_steps"), 0))
-        firings = int(st.session_state.get(self._k("batch_firings"), 0))
-        target_time = int(st.session_state.get(self._k("batch_target_time"), 0))
-        steps_done = mode == "steps" and max_steps > 0 and firings >= max_steps
-        time_done = mode == "time" and self.marking.global_clock >= target_time
-        if steps_done or time_done:
+        if decision == "done":
             self._end_batch(self._status_message("done"), rerun=True)
             return
 
@@ -1550,7 +1546,10 @@ class CPNStreamlitVisualizer:
         )
         frame_height = height + 20
         raw = cpn_graph(data, height=frame_height, key=self._k("graph"))
-        pick, layout = self._parse_graph_component_value(raw)
+        pick, layout, dismiss_id = self._parse_graph_component_value(raw)
+        if dismiss_id:
+            self._dismiss_status(dismiss_id)
+            self._request_rerun()
         if layout:
             self._handle_graph_layout_sync(layout)
         self._handle_graph_component_pick(pick, enabled_names)
@@ -1616,8 +1615,38 @@ class CPNStreamlitVisualizer:
 [data-testid="stSidebar"] [data-testid="stFileUploader"] section {
     padding: 0.35rem !important;
 }
+[data-testid="stSidebar"] .cpn-panel-header {
+    font-size: 0.95rem !important;
+    font-weight: 700 !important;
+    line-height: 1.3 !important;
+    margin: 0.1rem 0 0.5rem 0 !important;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    opacity: 0.7;
+}
+[data-testid="stSidebar"] .cpn-monitor-dot {
+    display: inline-block;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+    border: 1.5px solid rgba(49, 51, 63, 0.4);
+    margin-right: 0.4rem;
+    vertical-align: 0.05em;
+    box-sizing: border-box;
+}
+[data-testid="stSidebar"] .cpn-monitor-dot--triggered {
+    background: #2e7d32;
+    border-color: #2e7d32;
+}
 </style>
             """,
+            unsafe_allow_html=True,
+        )
+
+    def _panel_header(self, text: str) -> None:
+        """Render a sidebar section header distinct from body text (and spaced above following widgets)."""
+        st.markdown(
+            f'<div class="cpn-panel-header">{text}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1638,7 +1667,6 @@ class CPNStreamlitVisualizer:
 
         enabled = get_enabled_transitions(self.cpn, self.marking, self.context)
         enabled_names = [t.name for t in enabled]
-        guard_error_names = list(self.context.guard_error_names)
         self._apply_graph_transition_pick(enabled_names)
 
         self._run_pre_sidebar_drivers(transitions_enabled=bool(enabled))
@@ -1795,9 +1823,10 @@ class CPNStreamlitVisualizer:
             self._run_pre_sidebar_drivers()
             self._flush_rerun()
 
-        if not paint_pass:
-            self._sync_derived_status_messages(batch_running=batch_running)
-            self._render_status_messages()
+        # Drivers (incl. fast batch / show continuation) may have cleared batch_running
+        # after the early sidebar snapshot — re-read before status sync.
+        batch_running = self._batch_running()
+        self._sync_derived_status_messages(batch_running=batch_running)
 
         if self._needs_show_animation_wait():
             last_fired = st.session_state.get(self._k("last_fired"), {})

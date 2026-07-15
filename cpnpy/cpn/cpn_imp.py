@@ -8,6 +8,12 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Union, Callable
 from cpnpy.cpn.parser import InputArcParser
 
+
+def format_exception_oneline(exc: BaseException) -> str:
+    """Compact 'TypeName: message' for user-facing error surfaces."""
+    return f"{type(exc).__name__}: {exc}"
+
+
 class InputView:
     def __init__(self, data: dict):
         self._data = data
@@ -155,6 +161,10 @@ class Marking:
     def get_multiset(self, place_name: str) -> Multiset:
         return self._marking.get(place_name, Multiset())
 
+    def marked_place_names(self):
+        """Names of places that currently have a marking entry."""
+        return self._marking.keys()
+
     def __repr__(self):
         lines = [f"Marking (global_clock={self.global_clock}):"]
         for place, ms in self._marking.items():
@@ -200,14 +210,15 @@ class EvaluationContext:
                     )
             except Exception as e:
                 raise ValueError(
-                    f"Failed to load evaluation context user code: {type(e).__name__}: {e}"
+                    f"Failed to load evaluation context user code: "
+                    f"{format_exception_oneline(e)}"
                 ) from e
 
     def clear_guard_errors(self) -> None:
         self._guard_errors.clear()
 
     def record_guard_error(self, transition_name: str, exc: BaseException) -> None:
-        self._guard_errors[transition_name] = f"{type(exc).__name__}: {exc}"
+        self._guard_errors[transition_name] = format_exception_oneline(exc)
 
     @property
     def guard_error_names(self) -> list[str]:

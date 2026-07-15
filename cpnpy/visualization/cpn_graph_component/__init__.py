@@ -27,7 +27,9 @@ def cpn_graph(
     Return value:
     - Transition name (str) when the user clicks an enabled transition in Step sync mode.
     - JSON string ``{"type": "layout", "positions": {...}, "view": {...}}`` when the
-      iframe syncs manual layout (drag end or fit-in-view); otherwise None.
+      iframe syncs manual layout (drag end or fit-in-view).
+    - JSON string ``{"type": "dismiss_status", "id": "<dedup_id>"}`` when the user
+      dismisses an in-graph notification; otherwise None.
     """
     value = _cpn_graph(
         graph_data_json=json.dumps(graph_data),

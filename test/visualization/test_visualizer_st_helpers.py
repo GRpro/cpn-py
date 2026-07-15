@@ -27,10 +27,14 @@ from cpnpy.visualization.visualizer_st_helpers import (
     format_transition_graph_label,
     format_guard_external_label,
     normalize_animation_arcs,
+    normalize_batch_flags,
+    show_continuation_decision,
     animation_draw_count,
     format_simulation_error,
     format_simulation_metrics_row,
     get_action_source,
+    is_terminal_batch_status,
+    monitor_trigger_indicator,
     raise_if_invalid_net,
     resolve_layout_strategy,
     spacing_pct_to_spread_factor,
@@ -43,6 +47,7 @@ from cpnpy.visualization.visualizer_st_helpers import (
     is_status_dismissed,
     parse_layout_file_json,
     status_entry_fingerprint,
+    visible_status_notifications,
 )
 from cpnpy.cpn.cpn_imp import CPN, Place, Transition, Arc, Marking, EvaluationContext, ColorSetParser
 
@@ -615,3 +620,120 @@ def test_clear_status_dismiss_removes_entry():
     dismissed = {"a": "one", "b": "two"}
     assert clear_status_dismiss("a", dismissed) == {"b": "two"}
     assert is_status_dismissed("a", "one", clear_status_dismiss("a", dismissed)) is False
+
+
+def test_visible_status_notifications_filters_and_orders():
+    store = {
+        "batch_status": {"message": "Finished (3 transitions)", "level": "success"},
+        "sim_error": {"message": "Simulation error — boom", "level": "error"},
+        "step_idle": {"message": "No transitions enabled.", "level": "info"},
+        "sim_error_trace": {
+            "message": "Traceback...",
+            "level": "error",
+            "kind": "traceback",
+        },
+    }
+    dismissed = apply_status_dismiss("step_idle", "No transitions enabled.", {})
+    notes = visible_status_notifications(store, dismissed)
+    assert [n["id"] for n in notes] == ["sim_error", "sim_error_trace", "batch_status"]
+    assert notes[0]["level"] == "error"
+    assert notes[1]["kind"] == "traceback"
+    assert notes[2]["level"] == "success"
+
+
+def test_visible_status_notifications_empty():
+    assert visible_status_notifications(None) == []
+    assert visible_status_notifications({}) == []
+
+
+@pytest.mark.parametrize(
+    ("running", "phase", "status", "expected"),
+    [
+        (False, "idle", "Idle", (False, "idle", "Idle")),
+        (False, "idle", "Finished (3 transitions)", (False, "idle", "Finished (3 transitions)")),
+        (True, "fast", "Running", (True, "fast", "Running")),
+        (True, "advance", "Running", (True, "advance", "Running")),
+        (True, "show", "Running", (True, "show", "Running")),
+        # stuck: finished but still marked running
+        (True, "show", "Finished (3 transitions)", (False, "idle", "Finished (3 transitions)")),
+        (True, "advance", "Stopped", (False, "idle", "Stopped")),
+        # stuck: running flag with idle phase
+        (True, "idle", "Running", (False, "idle", "Idle")),
+        # stuck: active phase without running
+        (False, "show", "Running", (False, "idle", "Idle")),
+        (False, "advance", "Finished (1 transitions)", (False, "idle", "Finished (1 transitions)")),
+        # orphan Running status
+        (False, "idle", "Running", (False, "idle", "Idle")),
+        # unknown phase
+        (True, "weird", "Running", (False, "idle", "Idle")),
+        # running active phase with Idle status → Running
+        (True, "fast", "Idle", (True, "fast", "Running")),
+    ],
+)
+def test_normalize_batch_flags(running, phase, status, expected):
+    assert normalize_batch_flags(
+        batch_running=running, batch_phase=phase, batch_status=status,
+    ) == expected
+
+
+def test_is_terminal_batch_status():
+    assert is_terminal_batch_status("Finished (3 transitions)")
+    assert is_terminal_batch_status("Stopped")
+    assert is_terminal_batch_status("Deadlock at time 5")
+    assert is_terminal_batch_status("Error — boom")
+    assert not is_terminal_batch_status("Idle")
+    assert not is_terminal_batch_status("Running")
+
+
+def test_show_continuation_decision_monitor_before_done():
+    """Monitor hit on last_fired must win even when step cap is also met."""
+    assert show_continuation_decision(
+        last_fired={"monitor_hit": True, "monitors": ["M"], "transition": "T"},
+        stop_requested=False,
+        batch_mode="steps",
+        batch_max_steps=1,
+        batch_firings=1,
+        global_clock=0,
+        batch_target_time=0,
+    ) == "monitor"
+
+
+def test_show_continuation_decision_done_and_advance():
+    assert show_continuation_decision(
+        last_fired={"transition": "T", "in": [], "out": []},
+        stop_requested=False,
+        batch_mode="steps",
+        batch_max_steps=5,
+        batch_firings=5,
+        global_clock=0,
+        batch_target_time=0,
+    ) == "done"
+    assert show_continuation_decision(
+        last_fired={},
+        stop_requested=False,
+        batch_mode="steps",
+        batch_max_steps=0,
+        batch_firings=3,
+        global_clock=0,
+        batch_target_time=0,
+    ) == "advance"
+    assert show_continuation_decision(
+        last_fired={},
+        stop_requested=True,
+        batch_mode="steps",
+        batch_max_steps=0,
+        batch_firings=0,
+        global_clock=0,
+        batch_target_time=0,
+    ) == "stopped"
+
+
+def test_monitor_trigger_indicator_states():
+    idle = monitor_trigger_indicator(False)
+    hit = monitor_trigger_indicator(True)
+    assert idle != hit
+    assert "cpn-monitor-dot" in idle
+    assert "cpn-monitor-dot--triggered" not in idle
+    assert "cpn-monitor-dot--triggered" in hit
+    assert monitor_trigger_indicator(False) == idle
+    assert monitor_trigger_indicator(True) == hit

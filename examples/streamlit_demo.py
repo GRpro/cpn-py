@@ -24,9 +24,9 @@ def build_cpn():
         colset STR = string;
         colset TSTR = string timed;
         colset BOOL = bool;
-    colset DICT = dict;
-    colset RECORD_TYPE = record id:INT * val:STR;
-    colset INT_LIST = list INT;
+        colset DICT = dict;
+        colset RECORD_TYPE = record id:INT * val:STR;
+        colset INT_LIST = list INT;
     """)
 
     int_set = colorsets["INT"]

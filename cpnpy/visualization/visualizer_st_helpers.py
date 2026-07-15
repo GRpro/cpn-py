@@ -3,10 +3,11 @@
 import json
 import inspect
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from cpnpy.cpn.cpn_imp import CPN, Marking, Place, Transition
+from cpnpy.cpn.cpn_imp import CPN, Marking, Place, Transition, format_exception_oneline
 from cpnpy.cpn.parser import InputArcParser
 
 DEFAULT_TRANSITION_ANIMATION_MS = 500
@@ -25,6 +26,70 @@ GUARD_EXTERNAL_MAX_LEN = 48
 GUARD_EXTERNAL_MAX_LEN_LARGE = 32
 
 BATCH_TERMINAL = frozenset({"stopped", "done", "deadlock", "idle", "error"})
+BATCH_PHASES = frozenset({"idle", "fast", "advance", "show"})
+BATCH_ACTIVE_PHASES = frozenset({"fast", "advance", "show"})
+
+
+def is_terminal_batch_status(status: str) -> bool:
+    """True for Finished / Stopped / Deadlock / Error — not Idle or Running."""
+    return bool(status) and status not in ("Idle", "Running")
+
+
+def normalize_batch_flags(
+    *,
+    batch_running: bool,
+    batch_phase: str,
+    batch_status: str,
+) -> tuple[bool, str, str]:
+    """
+    Enforce happens-before invariants for batch session flags.
+
+    Legal states:
+      (running=False, phase=idle, status=Idle|terminal)
+      (running=True,  phase=fast|advance|show, status=Running)
+    """
+    phase = batch_phase if batch_phase in BATCH_PHASES else "idle"
+    status = batch_status if isinstance(batch_status, str) and batch_status else "Idle"
+    running = bool(batch_running)
+    terminal = is_terminal_batch_status(status)
+
+    if terminal and running:
+        return False, "idle", status
+    if running and phase == "idle":
+        return False, "idle", "Idle" if status == "Running" else status
+    if not running and phase != "idle":
+        return False, "idle", "Idle" if status == "Running" else status
+    if not running and status == "Running":
+        return False, "idle", "Idle"
+    if running and phase in BATCH_ACTIVE_PHASES and status != "Running":
+        return True, phase, "Running"
+    return running, phase, status
+
+
+def show_continuation_decision(
+    *,
+    last_fired: dict | None,
+    stop_requested: bool,
+    batch_mode: str,
+    batch_max_steps: int,
+    batch_firings: int,
+    global_clock: int,
+    batch_target_time: int,
+) -> str:
+    """
+    Pure decision after show-phase animation wait.
+    Returns: monitor | stopped | done | advance
+    """
+    fired = last_fired or {}
+    if fired.get("monitor_hit"):
+        return "monitor"
+    if stop_requested:
+        return "stopped"
+    if batch_mode == "steps" and batch_max_steps > 0 and batch_firings >= batch_max_steps:
+        return "done"
+    if batch_mode == "time" and global_clock >= batch_target_time:
+        return "done"
+    return "advance"
 
 
 @dataclass(frozen=True)
@@ -75,9 +140,20 @@ def monitor_batch_status_message(names: list[str]) -> str:
     return f"Stopped (monitors: {', '.join(names)})"
 
 
+def monitor_trigger_indicator(triggered: bool) -> str:
+    """
+    HTML fragment for the Monitors panel status circle.
+
+    Triggered: green filled. Idle: empty outline (keeps row alignment).
+    """
+    if triggered:
+        return '<span class="cpn-monitor-dot cpn-monitor-dot--triggered"></span>'
+    return '<span class="cpn-monitor-dot"></span>'
+
+
 def format_simulation_error(exc: BaseException) -> str:
     """Single-line simulation error for sidebar status (type + message)."""
-    return f"{type(exc).__name__}: {exc}"
+    return format_exception_oneline(exc)
 
 
 def format_simulation_metrics_row(clock: int, firings: int, enabled: int) -> str:
@@ -95,18 +171,15 @@ def validate_net_for_simulation(cpn: CPN, marking: Marking) -> list[str]:
     Returns a list of human-readable problems (empty when valid).
     """
     errors: list[str] = []
-    place_names = [p.name for p in cpn.places]
-    transition_names = [t.name for t in cpn.transitions]
-
-    if len(place_names) != len(set(place_names)):
-        errors.append("Duplicate place names detected.")
-    if len(transition_names) != len(set(transition_names)):
-        errors.append("Duplicate transition names detected.")
-
     place_by_name = {p.name: p for p in cpn.places}
     transition_by_name = {t.name: t for t in cpn.transitions}
 
-    for pname in marking._marking:
+    if len(place_by_name) != len(cpn.places):
+        errors.append("Duplicate place names detected.")
+    if len(transition_by_name) != len(cpn.transitions):
+        errors.append("Duplicate transition names detected.")
+
+    for pname in marking.marked_place_names():
         if pname not in place_by_name:
             errors.append(f"Marking references unknown place {pname!r}.")
 
@@ -119,6 +192,7 @@ def validate_net_for_simulation(cpn: CPN, marking: Marking) -> list[str]:
                 )
 
     arc_parser = InputArcParser()
+    input_vars_by_transition: dict[str, set[str]] = defaultdict(set)
     for arc in cpn.arcs:
         src, tgt = arc.source, arc.target
         if isinstance(src, Place) and isinstance(tgt, Transition):
@@ -131,7 +205,8 @@ def validate_net_for_simulation(cpn: CPN, marking: Marking) -> list[str]:
                     f"In-arc {src.name!r} -> {tgt.name!r} references unknown transition."
                 )
             try:
-                arc_parser.parse(arc.expression)
+                parsed = arc_parser.parse(arc.expression)
+                input_vars_by_transition[tgt.name].add(parsed.variable)
             except ValueError as e:
                 errors.append(
                     f"In-arc {src.name!r} -> {tgt.name!r} ({arc.expression!r}): {e}"
@@ -152,13 +227,7 @@ def validate_net_for_simulation(cpn: CPN, marking: Marking) -> list[str]:
             )
 
     for transition in cpn.transitions:
-        input_vars: set[str] = set()
-        for arc in cpn.get_input_arcs(transition):
-            try:
-                parsed = arc_parser.parse(arc.expression)
-                input_vars.add(parsed.variable)
-            except ValueError:
-                continue
+        input_vars = input_vars_by_transition.get(transition.name, set())
         for var in transition.variables:
             if var not in input_vars:
                 errors.append(
@@ -220,6 +289,41 @@ def clear_status_dismiss(
     updated = dict(dismissed)
     updated.pop(dedup_id, None)
     return updated
+
+
+STATUS_LEVEL_ORDER = ("error", "warning", "success", "info")
+_STATUS_LEVEL_RANK = {level: i for i, level in enumerate(STATUS_LEVEL_ORDER)}
+
+
+def visible_status_notifications(
+    store: dict | None,
+    dismissed: dict[str, str] | None = None,
+) -> list[dict]:
+    """
+    Build graph-overlay notification payloads from the status store.
+
+    Each item: {id, level, message, kind?} sorted by severity then id.
+    """
+    if not store:
+        return []
+    dismissed = dismissed or {}
+    visible: list[dict] = []
+    for dedup_id, item in store.items():
+        message = item.get("message", "")
+        if is_status_dismissed(dedup_id, message, dismissed):
+            continue
+        level = item.get("level", "info")
+        if level not in _STATUS_LEVEL_RANK:
+            level = "info"
+        entry = {"id": dedup_id, "level": level, "message": message}
+        kind = item.get("kind")
+        if kind:
+            entry["kind"] = kind
+        visible.append(entry)
+    visible.sort(
+        key=lambda row: (_STATUS_LEVEL_RANK.get(row["level"], 99), row["id"]),
+    )
+    return visible
 
 
 LARGE_GRAPH_NODE_THRESHOLD = 50
