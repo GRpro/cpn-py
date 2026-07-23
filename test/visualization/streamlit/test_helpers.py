@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from cpnpy.visualization.visualizer_st_helpers import (
+from cpnpy.visualization.streamlit.helpers import (
     BASE_SPREAD,
     DEFAULT_TRANSITION_ANIMATION_MS,
     LARGE_GRAPH_NODE_THRESHOLD,
@@ -401,7 +401,7 @@ def _build_minimal_valid_net():
 
 
 def test_parallel_arc_edges_have_unique_ids():
-    from cpnpy.visualization.visualizer_st import CPNStreamlitVisualizer
+    from cpnpy.visualization.streamlit.ui import CPNStreamlitVisualizer
 
     parser = ColorSetParser()
     int_set = parser.parse_definitions("colset INT = int;")["INT"]

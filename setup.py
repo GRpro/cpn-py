@@ -39,7 +39,10 @@ setup(
     python_requires=">=3.6",
     install_requires=install_requires,
     package_data={
-        "cpnpy.visualization.cpn_graph_component": ["index.html"],
+        "cpnpy.visualization.streamlit.cpn_graph_component": [
+            "index.html",
+            "vis-network.min.js",
+        ],
     },
     classifiers=[
         "Programming Language :: Python :: 3",

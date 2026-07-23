@@ -8,15 +8,17 @@ from typing import Callable
 import streamlit as st
 
 from cpnpy.cpn.cpn_imp import CPN, Marking, EvaluationContext
+from cpnpy.visualization.streamlit.runtime import SimulationRuntime
+from cpnpy.visualization.streamlit.step_engine import BatchConfig
 from cpnpy.simulation.simu import get_enabled_transitions
-from cpnpy.visualization.cpn_graph_component import cpn_graph
-from cpnpy.visualization.visualizer_st_helpers import (
+from cpnpy.visualization.streamlit.cpn_graph_component import cpn_graph
+from cpnpy.visualization.streamlit.helpers import (
     ANIMATION_START_BUFFER_MS,
+    ASYNC_BATCH_POLL_MS,
     BATCH_TERMINAL,
     DEFAULT_LAYOUT_STRATEGY,
     DEFAULT_SPACING_PCT,
     DEFAULT_TRANSITION_ANIMATION_MS,
-    FAST_BATCH_ADVANCES_PER_RUN,
     FAST_BATCH_MAX_ITERATIONS,
     MAX_ADVANCES_PER_RUN,
     MAX_SPACING_PCT,
@@ -26,13 +28,10 @@ from cpnpy.visualization.visualizer_st_helpers import (
     MonitorSpec,
     STOP_POLL_MS,
     animation_wait_ms,
+    arc_edge_id,
     batch_status_level,
-    batch_step_logic,
     compute_animation_timings,
     compute_graph_layout,
-    enabled_transition_names,
-    evaluate_monitors,
-    arc_edge_id,
     format_simulation_error,
     format_simulation_metrics_row,
     get_action_source,
@@ -101,28 +100,82 @@ class CPNStreamlitVisualizer:
       show    — display firing animation, then return to advance
     """
 
-    def __init__(self, cpn: CPN, marking: Marking,
-                 context: EvaluationContext | None = None,
-                 session_key: str = "cpn_marking"):
-        validated_key = f"{session_key}_net_validated"
-        if not st.session_state.get(validated_key):
-            raise_if_invalid_net(cpn, marking)
-            st.session_state[validated_key] = True
-        self.cpn = cpn
-        self.context = context or EvaluationContext()
+    def __init__(
+        self,
+        cpn: CPN | None = None,
+        marking: Marking | None = None,
+        context: EvaluationContext | None = None,
+        session_key: str = "cpn_marking",
+        *,
+        runtime: SimulationRuntime | None = None,
+    ):
+        """
+        Construct with ``runtime=...`` or with ``(cpn, marking, context)``.
+
+        ``session_key`` caches the runtime object in ``st.session_state`` (not a
+        parallel marking). The runtime is the sole owner of the live Marking.
+        """
         self.session_key = session_key
-        if self.session_key not in st.session_state:
-            st.session_state[self.session_key] = marking
-        self.marking = st.session_state[self.session_key]
+        cached = st.session_state.get(session_key)
+        if runtime is not None:
+            self.runtime = runtime
+            st.session_state[session_key] = runtime
+        elif isinstance(cached, SimulationRuntime):
+            self.runtime = cached
+        else:
+            if cpn is None or marking is None:
+                raise TypeError(
+                    "CPNStreamlitVisualizer requires runtime=... or "
+                    "(cpn, marking, context=...)"
+                )
+            validated_key = f"{session_key}_net_validated"
+            if not st.session_state.get(validated_key):
+                raise_if_invalid_net(cpn, marking)
+                st.session_state[validated_key] = True
+            self.runtime = SimulationRuntime(
+                cpn, marking, context or EvaluationContext(),
+            )
+            st.session_state[session_key] = self.runtime
+
+        self.cpn = self.runtime.cpn
+        self.context = self.runtime.context
         initial_key = f"{self.session_key}_initial"
         if initial_key not in st.session_state:
-            st.session_state[initial_key] = copy.deepcopy(self.marking)
+            st.session_state[initial_key] = copy.deepcopy(self.runtime.marking)
         self._init_session_defaults()
         self._has_timed_places = any(
             place.colorset.timed for place in self.cpn.places
         )
         self._monitors: list[MonitorSpec] = []
 
+    @property
+    def marking(self) -> Marking:
+        return self.runtime.marking
+
+    def _graph_marking(self) -> Marking:
+        """Marking used for graph tokens; frozen while async batch runs."""
+        frozen = st.session_state.get(self._k("graph_freeze_marking"))
+        if frozen is not None and self._async_batch_active():
+            return frozen
+        return self.runtime.marking
+
+    def _async_batch_active(self) -> bool:
+        return bool(st.session_state.get(self._k("async_batch_active")))
+
+    def _sync_runtime_monitors(self) -> None:
+        self.runtime.set_monitors(self._monitors, self._monitor_enabled_slugs())
+
+    def _batch_config_from_session(self) -> BatchConfig:
+        mode = st.session_state.get(self._k("batch_mode"), "steps")
+        auto = True if mode == "time" else st.session_state.get(
+            self._k("batch_auto_advance"), True,
+        )
+        return BatchConfig(
+            mode=mode,
+            max_steps=int(st.session_state.get(self._k("batch_max_steps"), 0)),
+            target_time=int(st.session_state.get(self._k("batch_target_time"), 0)),
+            auto_advance=bool(auto),
+        )
     def register_monitor(
         self,
         name: str,
@@ -432,6 +485,9 @@ class CPNStreamlitVisualizer:
             st.session_state[self._k("batch_stop_requested")] = False
             st.session_state.pop(self._k("show_sleep_complete"), None)
             st.session_state.pop(self._k("show_frame_painted"), None)
+            # Do not orphan async lease/freeze if repair cleared batch_running.
+            st.session_state.pop(self._k("async_batch_active"), None)
+            st.session_state.pop(self._k("graph_freeze_marking"), None)
 
     def _apply_graph_transition_pick(self, enabled_names: list[str]) -> None:
         """Apply transition chosen on the graph before the selectbox is drawn."""
@@ -500,8 +556,8 @@ class CPNStreamlitVisualizer:
                     "(checked about every 50 ms)."
                     if animated
                     else (
-                        f"Halts after the current batch chunk "
-                        f"(up to {FAST_BATCH_ADVANCES_PER_RUN} steps)."
+                        "Requests a cooperative stop; the worker finishes the "
+                        "current step then ends the batch."
                     )
                 ),
             )
@@ -552,7 +608,7 @@ class CPNStreamlitVisualizer:
         return int(st.session_state.get(self._k("anim_ms"), DEFAULT_TRANSITION_ANIMATION_MS))
 
     def _place_node(self, place, now: int) -> dict:
-        ms = self.marking.get_multiset(place.name)
+        ms = self._graph_marking().get_multiset(place.name)
         avail = sum(1 for t in ms.tokens if t.timestamp <= now)
         future = sum(1 for t in ms.tokens if t.timestamp > now)
         is_timed = place.colorset.timed
@@ -763,7 +819,8 @@ class CPNStreamlitVisualizer:
                       guard_error_names: list[str] | None = None):
         animate_in = normalize_animation_arcs(animate_in or [])
         animate_out = normalize_animation_arcs(animate_out or [])
-        now = self.marking.global_clock
+        graph_marking = self._graph_marking()
+        now = graph_marking.global_clock
         nodes = [
             self._place_node(place, now)
             for place in self.cpn.places
@@ -843,47 +900,32 @@ class CPNStreamlitVisualizer:
         """Fire a transition; increment step_count on success."""
         self._clear_sim_error()
         try:
-            trans = self.cpn.get_transition_by_name(transition_name)
-            if trans is None:
-                raise ValueError(f"Unknown transition {transition_name!r}.")
-            all_enabled = get_enabled_transitions(
-                self.cpn, self.marking, self.context, only_best_priority=False,
+            self._sync_runtime_monitors()
+            if st.session_state.pop(self._k("monitors_resume_once"), False):
+                self.runtime.skip_monitors_once()
+            result = self.runtime.fire(transition_name)
+            if result.kind == "error":
+                self._record_sim_error(Exception(result.error or "fire failed"))
+                return {"in": [], "out": []}
+            if result.kind == "monitor":
+                before_fired = bool(result.firings)
+                st.session_state[self._k("monitors_triggered")] = list(result.monitors)
+                self._notify_monitor_hit(list(result.monitors))
+                info = dict(result.info)
+                if before_fired:
+                    st.session_state[self._k("step_count")] = (
+                        st.session_state.get(self._k("step_count"), 0) + 1
+                    )
+                    if info.get("transition"):
+                        st.session_state[self._k("last_fired_name")] = info["transition"]
+                        st.session_state.pop(self._k("manual_deadlock"), None)
+                return info
+            info = dict(result.info)
+            st.session_state[self._k("step_count")] = (
+                st.session_state.get(self._k("step_count"), 0) + 1
             )
-            enabled_names = enabled_transition_names(all_enabled)
-            enabled_slugs = self._monitor_enabled_slugs()
-            skip_monitors = st.session_state.pop(self._k("monitors_resume_once"), False)
-            before_hit = [] if skip_monitors else evaluate_monitors(
-                self._monitors,
-                phase="before",
-                cpn=self.cpn,
-                marking=self.marking,
-                pending_transition=transition_name,
-                enabled_names=enabled_names,
-                enabled_slugs=enabled_slugs,
-            )
-            if before_hit:
-                st.session_state[self._k("monitors_triggered")] = before_hit
-                self._notify_monitor_hit(before_hit)
-                return {"monitor_hit": True, "monitors": before_hit, "in": [], "out": []}
-            info = self.cpn.fire_transition(trans, self.marking, self.context)
-            info["transition"] = transition_name
-            st.session_state[self._k("step_count")] = st.session_state.get(self._k("step_count"), 0) + 1
             st.session_state[self._k("last_fired_name")] = transition_name
             st.session_state.pop(self._k("manual_deadlock"), None)
-            after_hit = [] if skip_monitors else evaluate_monitors(
-                self._monitors,
-                phase="after",
-                cpn=self.cpn,
-                marking=self.marking,
-                pending_transition=transition_name,
-                enabled_names=enabled_names,
-                enabled_slugs=enabled_slugs,
-            )
-            if after_hit:
-                st.session_state[self._k("monitors_triggered")] = after_hit
-                self._notify_monitor_hit(after_hit)
-                info["monitor_hit"] = True
-                info["monitors"] = after_hit
             return info
         except Exception as e:
             self._record_sim_error(e)
@@ -893,9 +935,7 @@ class CPNStreamlitVisualizer:
         """Advance global clock once. Returns True if the clock moved."""
         self._clear_sim_error()
         try:
-            before = self.marking.global_clock
-            self.cpn.advance_global_clock(self.marking)
-            return self.marking.global_clock != before
+            return self.runtime.advance_clock()
         except Exception as e:
             self._record_sim_error(e)
             return False
@@ -925,44 +965,46 @@ class CPNStreamlitVisualizer:
         self._request_rerun()
 
     def _batch_step(self) -> tuple[str, dict]:
-        enabled = get_enabled_transitions(self.cpn, self.marking, self.context)
-        enabled_name = enabled[0].name if enabled else None
-        mode = st.session_state.get(self._k("batch_mode"), "steps")
-        auto = True if mode == "time" else st.session_state.get(self._k("batch_auto_advance"), True)
-
-        result = batch_step_logic(
-            batch_mode=mode,
-            batch_max_steps=int(st.session_state.get(self._k("batch_max_steps"), 0)),
-            batch_target_time=int(st.session_state.get(self._k("batch_target_time"), 0)),
-            batch_auto_advance=auto,
-            batch_stop_requested=bool(st.session_state.get(self._k("batch_stop_requested"), False)),
-            batch_firings=int(st.session_state.get(self._k("batch_firings"), 0)),
-            global_clock=self.marking.global_clock,
-            enabled_name=enabled_name,
+        self._sync_runtime_monitors()
+        if st.session_state.pop(self._k("monitors_resume_once"), False):
+            self.runtime.skip_monitors_once()
+        config = self._batch_config_from_session()
+        firings = int(st.session_state.get(self._k("batch_firings"), 0))
+        stop = bool(st.session_state.get(self._k("batch_stop_requested"), False))
+        result = self.runtime.run_macro_step(
+            config, stop_requested=stop, batch_firings=firings,
         )
+        st.session_state[self._k("batch_firings")] = result.firings
 
-        if result == "fired" and enabled_name:
-            info = self.fire(enabled_name)
-            if st.session_state.get(self._k("sim_error")):
-                return "error", {}
-            if info.get("monitor_hit"):
-                if info.get("transition"):
-                    st.session_state[self._k("batch_firings")] = (
-                        st.session_state.get(self._k("batch_firings"), 0) + 1
-                    )
-                if info.get("transition") and st.session_state.get(self._k("batch_animate")):
-                    return "fired", info
-                return "monitor", info
-            st.session_state[self._k("batch_firings")] = st.session_state.get(self._k("batch_firings"), 0) + 1
+        if result.kind == "error":
+            if result.error:
+                self._record_sim_error(Exception(result.error))
+            return "error", {}
+
+        if result.kind == "monitor":
+            info = dict(result.info)
+            names = list(result.monitors)
+            st.session_state[self._k("monitors_triggered")] = names
+            self._notify_monitor_hit(names)
+            if info.get("transition"):
+                st.session_state[self._k("step_count")] = (
+                    st.session_state.get(self._k("step_count"), 0) + 1
+                )
+                st.session_state[self._k("last_fired_name")] = info["transition"]
+            if info.get("transition") and st.session_state.get(self._k("batch_animate")):
+                return "fired", info
+            return "monitor", info
+
+        if result.kind == "fired":
+            info = dict(result.info)
+            st.session_state[self._k("step_count")] = (
+                st.session_state.get(self._k("step_count"), 0) + 1
+            )
+            if info.get("transition"):
+                st.session_state[self._k("last_fired_name")] = info["transition"]
             return "fired", info
 
-        if result == "need_advance":
-            if not self._advance_global_clock_once():
-                return "deadlock", {}
-            return "advanced", {}
-
-        return result, {}
-
+        return result.kind, dict(result.info)
     def _status_message(self, result: str) -> str:
         if result == "stopped":
             return "Stopped"
@@ -1003,9 +1045,14 @@ class CPNStreamlitVisualizer:
 
     def _request_batch_stop(self) -> None:
         st.session_state[self._k("batch_stop_requested")] = True
+        if self._async_batch_active():
+            self.runtime.request_stop()
 
     def _abort_batch_if_stop_requested(self) -> bool:
         if st.session_state.get(self._k("batch_stop_requested")):
+            if self._async_batch_active():
+                self.runtime.request_stop()
+                return False
             st.session_state.pop(self._k("last_fired"), None)
             self._end_batch("Stopped", rerun=True)
             return True
@@ -1021,10 +1068,17 @@ class CPNStreamlitVisualizer:
 
     def _render_simulation_metrics(self, step_count: int, n_enabled: int) -> None:
         """Prominent global clock, firing count, and enabled transitions (core CPN state)."""
+        if self._async_batch_active():
+            status = self.runtime.poll_status(renew=False)
+            clock = status.global_clock
+            firings = status.firings
+        else:
+            clock = self.marking.global_clock
+            firings = step_count
         st.text(
             format_simulation_metrics_row(
-                self.marking.global_clock,
-                step_count,
+                clock,
+                firings,
                 n_enabled,
             )
         )
@@ -1035,8 +1089,13 @@ class CPNStreamlitVisualizer:
         target_time = int(st.session_state.get(self._k("batch_target_time"), 0))
         auto_advance = bool(st.session_state.get(self._k("batch_auto_advance"), True))
         batch_animate = bool(st.session_state.get(self._k("batch_animate"), False))
-        firings = int(st.session_state.get(self._k("batch_firings"), 0))
-        clock = self.marking.global_clock
+        if self._async_batch_active():
+            status = self.runtime.poll_status(renew=False)
+            firings = status.firings
+            clock = status.global_clock
+        else:
+            firings = int(st.session_state.get(self._k("batch_firings"), 0))
+            clock = self.marking.global_clock
         anim = "on" if batch_animate else "off"
 
         if mode_key == "steps":
@@ -1177,6 +1236,8 @@ class CPNStreamlitVisualizer:
         st.session_state[self._k("batch_status")] = status
         st.session_state[self._k("batch_phase")] = "idle"
         st.session_state[self._k("batch_stop_requested")] = False
+        st.session_state.pop(self._k("async_batch_active"), None)
+        st.session_state.pop(self._k("graph_freeze_marking"), None)
         st.session_state.pop(self._k("show_sleep_complete"), None)
         st.session_state.pop(self._k("show_frame_painted"), None)
         st.session_state[self._k("batch_ui_mode")] = mode
@@ -1206,6 +1267,7 @@ class CPNStreamlitVisualizer:
             "batch_running", "batch_stop_requested", "batch_mode", "batch_max_steps",
             "batch_target_time", "batch_animate", "batch_auto_advance", "batch_firings",
             "batch_anim_ms", "batch_phase", "batch_fast_iterations",
+            "async_batch_active", "graph_freeze_marking",
         ):
             st.session_state.pop(self._k(suffix), None)
         st.session_state[self._k("batch_phase")] = "idle"
@@ -1222,10 +1284,12 @@ class CPNStreamlitVisualizer:
         st.session_state.pop(self._k("batch_animate_ui"), None)
 
     def _reset_simulation(self):
-        st.session_state[self.session_key] = copy.deepcopy(
-            st.session_state[f"{self.session_key}_initial"]
+        self.runtime.reset_marking(
+            copy.deepcopy(st.session_state[f"{self.session_key}_initial"])
         )
-        self.marking = st.session_state[self.session_key]
+        st.session_state[self.session_key] = self.runtime
+        st.session_state.pop(self._k("graph_freeze_marking"), None)
+        st.session_state.pop(self._k("async_batch_active"), None)
         st.session_state[self._k("step_count")] = 0
         st.session_state[self._k("anim_ms")] = DEFAULT_TRANSITION_ANIMATION_MS
         self._clear_sim_error()
@@ -1363,20 +1427,79 @@ class CPNStreamlitVisualizer:
         st.session_state[self._k("sidebar_panel")] = "batch"
 
         if animate:
+            st.session_state.pop(self._k("async_batch_active"), None)
+            st.session_state.pop(self._k("graph_freeze_marking"), None)
             st.session_state[self._k("batch_phase")] = "advance"
             st.session_state[self._k("run_drivers_after_sidebar")] = True
         else:
             st.session_state[self._k("batch_phase")] = "fast"
+            st.session_state[self._k("graph_freeze_marking")] = copy.deepcopy(
+                self.runtime.marking,
+            )
+            st.session_state[self._k("async_batch_active")] = True
+            self._sync_runtime_monitors()
+            if st.session_state.pop(self._k("monitors_resume_once"), False):
+                self.runtime.skip_monitors_once()
+            submitted = self.runtime.submit_non_animated_batch(
+                self._batch_config_from_session(),
+            )
+            if not submitted:
+                st.session_state.pop(self._k("async_batch_active"), None)
+                st.session_state.pop(self._k("graph_freeze_marking"), None)
+                self._end_batch("Error — runtime busy", rerun=True)
 
     def _run_fast_batch_after_sidebar(self) -> None:
-        """Run fast batch after sidebar so Stop batch stays reachable between chunks."""
+        """Poll async non-animated batch; renew lease; end on terminal."""
         if not self._batch_running():
             return
         if st.session_state.get(self._k("batch_animate")):
             return
-        if self._abort_batch_if_stop_requested():
+        if not self._async_batch_active():
             return
-        self._run_fast_batch_phase()
+
+        status = self.runtime.poll_status(renew=True)
+        st.session_state[self._k("batch_firings")] = status.firings
+        st.session_state[self._k("step_count")] = max(
+            int(st.session_state.get(self._k("step_count"), 0)),
+            status.firings,
+        )
+        # Keep exact "Running" while async so _repair_batch_session does not
+        # treat decorated runtime status strings as terminal.
+        if status.async_running:
+            st.session_state[self._k("batch_status")] = "Running"
+            if st.session_state.get(self._k("batch_stop_requested")):
+                self.runtime.request_stop()
+            time.sleep(ASYNC_BATCH_POLL_MS / 1000.0)
+            self._request_rerun()
+            return
+
+        st.session_state[self._k("batch_status")] = status.status
+
+        # Terminal: drop freeze so graph shows final marking from runtime.
+        st.session_state.pop(self._k("graph_freeze_marking"), None)
+        st.session_state.pop(self._k("async_batch_active"), None)
+        if status.terminal_reason == "monitor":
+            names = list(status.monitor_names)
+            st.session_state[self._k("monitors_triggered")] = names
+            self._notify_monitor_hit(names)
+            self._end_batch(
+                monitor_batch_status_message(names),
+                rerun=True,
+            )
+            return
+        if status.terminal_reason == "lease_expired":
+            self._end_batch(status.status, rerun=True)
+            return
+        if status.terminal_reason == "stopped":
+            self._end_batch("Stopped", rerun=True)
+            return
+        if status.terminal_reason == "error":
+            if status.error:
+                self._record_sim_error(Exception(status.error))
+            self._end_batch(self._status_message("error"), rerun=True)
+            return
+        reason = status.terminal_reason or "done"
+        self._end_batch(self._status_message(reason), rerun=True)
 
     def _clear_opposite_batch_widgets(self, mode_key: str) -> None:
         if mode_key == "steps":
@@ -1451,14 +1574,6 @@ class CPNStreamlitVisualizer:
             st.session_state[self._k("batch_fast_iterations")] = iterations
         if self._batch_running():
             self._request_rerun()
-
-    def _run_fast_batch_phase(self) -> None:
-        self._run_batch_advance_loop(
-            expected_phase="fast",
-            require_animate=False,
-            track_iterations=True,
-            max_per_run=FAST_BATCH_ADVANCES_PER_RUN,
-        )
 
     def _run_animated_advance_phase(self) -> None:
         self._run_batch_advance_loop(
@@ -1665,7 +1780,9 @@ class CPNStreamlitVisualizer:
         self._sync_monitor_cfg_from_widgets()
         self._flush_rerun()
 
-        enabled = get_enabled_transitions(self.cpn, self.marking, self.context)
+        enabled = get_enabled_transitions(
+            self.cpn, self._graph_marking(), self.context,
+        )
         enabled_names = [t.name for t in enabled]
         self._apply_graph_transition_pick(enabled_names)
 

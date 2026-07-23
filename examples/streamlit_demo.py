@@ -5,8 +5,7 @@ from cpnpy.cpn.cpn_imp import (
     CPN, Place, Transition, Arc, Marking, EvaluationContext,
     ColorSetParser,
 )
-from cpnpy.visualization.visualizer_st import CPNStreamlitVisualizer
-from cpnpy.visualization.visualizer_st_helpers import format_simulation_error
+from cpnpy.visualization.streamlit import CPNStreamlitVisualizer, format_simulation_error
 
 
 def build_cpn():
@@ -159,19 +158,19 @@ def main():
             with st.expander("Error details", expanded=False):
                 st.code(traceback.format_exc(), language="text")
             st.stop()
-        st.session_state["demo_cpn"]     = cpn
-        st.session_state["demo_marking"] = marking
+        st.session_state["demo_cpn"] = cpn
         st.session_state["demo_context"] = context
-        st.session_state["cpn_built"]    = True
+        st.session_state["demo_initial_marking"] = marking
+        st.session_state["cpn_built"] = True
 
-    cpn     = st.session_state["demo_cpn"]
+    cpn = st.session_state["demo_cpn"]
     context = st.session_state["demo_context"]
-
+    # Triple path: visualizer creates/caches SimulationRuntime under session_key.
     viz = CPNStreamlitVisualizer(
         cpn,
-        st.session_state["demo_marking"],
+        st.session_state["demo_initial_marking"],
         context=context,
-        session_key="demo_marking",
+        session_key="demo_runtime",
     )
     viz.register_monitor(
         "T_Increment enabled",

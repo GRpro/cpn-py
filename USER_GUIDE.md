@@ -16,14 +16,27 @@ The demo builds a small net with integers, strings, timed places, records, lists
 **Embed in your own Streamlit app:**
 
 ```python
-from cpnpy.visualization.visualizer_st import CPNStreamlitVisualizer
+from cpnpy.visualization.streamlit import CPNStreamlitVisualizer
 
-viz = CPNStreamlitVisualizer(cpn, marking, context=context, session_key="my_marking")
+# Triple path: visualizer creates SimulationRuntime once and caches it under session_key.
+viz = CPNStreamlitVisualizer(cpn, marking, context=context, session_key="my_runtime")
 viz.register_monitor("Clock >= 10", lambda cpn, m: m.global_clock >= 10, before=True)
 viz.render(height=800)
 ```
 
-The marking is stored in `st.session_state[session_key]` and survives reruns.
+Or pass an existing runtime (scripts/tests can build it without Streamlit):
+
+```python
+from cpnpy.visualization.streamlit import SimulationRuntime, BatchConfig
+
+runtime = SimulationRuntime(cpn, marking, context)
+runtime.run_batch_sync(BatchConfig(mode="steps", max_steps=100))
+# In Streamlit:
+viz = CPNStreamlitVisualizer(runtime=runtime, session_key="my_runtime")
+viz.render()
+```
+
+`session_key` caches the **runtime object** in `st.session_state` (not a separate marking). The runtime owns the live marking and context for the session.
 
 ---
 
@@ -181,7 +194,7 @@ Prints step/time progress to stdout. Does not drive the Streamlit graph.
 
 The demo opens with a **sidebar** (controls) on the left and the **interactive graph** on the right. Status notifications overlay the graph canvas when simulation events occur (errors, batch completion, monitor pause).
 
-![CPN-py Streamlit demo — initial load](docs/images/streamlit-demo-ui.png)
+![CPN-py Streamlit demo — initial load](images/streamlit-demo-ui.png)
 
 *Screenshot: `streamlit run examples/streamlit_demo.py` at initial load (Clock 0, Firings 0, Enabled 4). The full demo net is visible: integer flow (`P_Numbers` → `T_Increment` → `P_Buffer` → parity checks), string/timed flow (`P_Source` → `T_Send` → `P_InTransit` → `T_Deliver`), and action-block transitions (`T_ToDict`, `T_ToRecord`, `T_Accumulate`). Green boxes are enabled; gray boxes are disabled at this marking.*
 
@@ -288,7 +301,7 @@ Slider **Animation duration (ms)** — 50–5000, default 500. Controls how long
 4. Optional: **Animate each step** — show firing animation for each step (slower, easier to follow)
 5. Click **Start batch**. The same button becomes **Stop batch** while running.
 
-**Fast batch (no animation):** Runs several steps per page refresh so the UI stays responsive; **Stop** remains clickable between chunks.
+**Fast batch (no animation):** Runs on a background worker inside `SimulationRuntime`. The UI polls counters about every 3s (clock/firings), renews a 15s lease, and redraws the graph only after the batch finishes, stops, hits a monitor, or the lease expires. **Stop batch** requests a cooperative stop after the current step.
 
 **After batch finishes:** Status overlays the graph (e.g. Finished, Deadlock, Stopped).
 
@@ -427,7 +440,7 @@ Sidebar layout controls:
 1. Build `CPN`, `Marking`, `EvaluationContext` as today.
 2. Pass them to `CPNStreamlitVisualizer`.
 3. Register monitors for domain checkpoints (e.g. before `Drive`, before `WriteMetrics`).
-4. Use `session_key` unique per net instance if multiple visualizers coexist.
+4. Prefer `runtime=` or a stable `session_key` so one visualizer identity caches one runtime; do not keep a second live marking in session state.
 
 ---
 
