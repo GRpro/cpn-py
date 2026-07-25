@@ -215,3 +215,121 @@ def test_monitor_resume_skip_once_resubmit(st_session):
     v.runtime.skip_monitors_once()
     status = v.runtime.run_batch_sync(BatchConfig(mode="steps", max_steps=5))
     assert status.firings >= 1
+
+
+def test_layout_export_empty_session_uses_capture_button(st_session):
+    session, fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_export_empty",
+    )
+    v._init_session_defaults()
+    v._notify = MagicMock()  # type: ignore[method-assign]
+    fake_st.button.return_value = False
+
+    v._render_layout_export_controls(batch_running=False)
+
+    fake_st.download_button.assert_not_called()
+    fake_st.button.assert_called_once()
+    assert fake_st.button.call_args.kwargs["key"] == v._k("export_graph_layout_capture")
+    assert session.get(v._k("graph_layout_positions")) in (None, {})
+
+
+def test_layout_export_filled_session_uses_download(st_session):
+    session, fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_export_full",
+    )
+    v._init_session_defaults()
+    node_ids = v._graph_node_ids()
+    positions = {nid: {"x": float(i), "y": 1.0} for i, nid in enumerate(node_ids)}
+    v._set_saved_layout_session(positions)
+
+    v._render_layout_export_controls(batch_running=False)
+
+    fake_st.download_button.assert_called_once()
+    data = fake_st.download_button.call_args.kwargs["data"]
+    assert '"positions"' in data
+    assert node_ids[0] in data
+    fake_st.button.assert_not_called()
+
+
+def test_prepare_data_auto_sync_once_when_session_empty(st_session):
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_auto_sync",
+    )
+    v._init_session_defaults()
+
+    first = v._prepare_data([])
+    assert first.get("sync_layout_to_session") is True
+    assert session[v._k("layout_auto_sync_attempted")] is True
+
+    second = v._prepare_data([])
+    assert "sync_layout_to_session" not in second
+
+
+def test_prepare_data_force_sync_from_export_click(st_session):
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_force_sync",
+    )
+    v._init_session_defaults()
+    session[v._k("layout_auto_sync_attempted")] = True
+    v._request_layout_session_sync()
+
+    payload = v._prepare_data([])
+    assert payload.get("sync_layout_to_session") is True
+    assert v._k("sync_layout_to_session") not in session
+
+
+def test_handle_graph_layout_sync_fills_session_for_export(st_session):
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_sync_fill",
+    )
+    v._init_session_defaults()
+    node_ids = v._graph_node_ids()
+    positions = {nid: {"x": 10.0, "y": 20.0} for nid in node_ids}
+
+    v._handle_graph_layout_sync({"positions": positions, "view": {"scale": 1.0}})
+
+    assert v._session_has_layout_positions()
+    export = v._layout_export_json()
+    assert node_ids[0] in export
+    assert session[v._k("graph_layout_view")]["scale"] == 1.0
+
+
+def test_layout_sync_empty_to_filled_requests_rerun(st_session, monkeypatch):
+    """Sidebar Export renders before the graph; empty→filled must schedule a rerun."""
+    import json
+
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="layout_sync_rerun",
+    )
+    v._init_session_defaults()
+    node_ids = v._graph_node_ids()
+    positions = {nid: {"x": 1.0, "y": 2.0} for nid in node_ids}
+    layout_raw = json.dumps({
+        "type": "layout",
+        "positions": positions,
+        "view": {"scale": 1.0},
+    })
+    v._request_rerun = MagicMock()  # type: ignore[method-assign]
+    v._handle_graph_component_pick = MagicMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(viz_mod, "cpn_graph", MagicMock(return_value=layout_raw))
+
+    v._render_graph_panel(height=400, enabled_names=[], last_fired={})
+    v._request_rerun.assert_called_once()
+    assert v._session_has_layout_positions()
+
+    v._request_rerun.reset_mock()
+    v._render_graph_panel(height=400, enabled_names=[], last_fired={})
+    v._request_rerun.assert_not_called()
+    assert session[v._k("graph_layout_positions")]

@@ -45,7 +45,9 @@ from cpnpy.visualization.streamlit.helpers import (
     clear_status_dismiss,
     graph_layout_storage_key,
     is_status_dismissed,
+    layout_has_position_gaps,
     parse_layout_file_json,
+    prune_layout_positions,
     status_entry_fingerprint,
     visible_status_notifications,
 )
@@ -491,6 +493,25 @@ def test_apply_imported_positions_partial():
 def test_apply_imported_positions_empty_import_no_op():
     existing = {"P": {"x": 1.0, "y": 2.0}}
     assert apply_imported_positions(["P"], existing, {}) == existing
+
+
+def test_prune_layout_positions_keeps_live_ids_only():
+    existing = {
+        "P": {"x": 1.0, "y": 2.0},
+        "Gone": {"x": 9.0, "y": 9.0},
+    }
+    assert prune_layout_positions(["P", "New"], existing) == {"P": {"x": 1.0, "y": 2.0}}
+
+
+def test_apply_imported_positions_drops_removed_node_coords():
+    existing = {"P": {"x": 0.0, "y": 0.0}, "Old": {"x": 1.0, "y": 1.0}}
+    merged = apply_imported_positions(["P", "T"], existing, {"T": {"x": 3.0, "y": 4.0}})
+    assert merged == {"P": {"x": 0.0, "y": 0.0}, "T": {"x": 3.0, "y": 4.0}}
+
+
+def test_layout_has_position_gaps():
+    assert layout_has_position_gaps(["P", "T"], {"P": {"x": 0.0, "y": 0.0}})
+    assert not layout_has_position_gaps(["P"], {"P": {"x": 0.0, "y": 0.0}})
 
 
 def test_format_simulation_metrics_row_shows_full_values():

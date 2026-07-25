@@ -52,7 +52,9 @@ from cpnpy.visualization.streamlit.helpers import (
     build_layout_file_payload,
     clear_status_dismiss,
     graph_layout_storage_key,
+    layout_has_position_gaps,
     parse_layout_file_json,
+    prune_layout_positions,
     show_continuation_decision,
     slugify_monitor_name,
     visible_status_notifications,
@@ -724,13 +726,27 @@ class CPNStreamlitVisualizer:
         st.session_state.pop(self._k("graph_layout_view"), None)
         st.session_state.pop(self._k("graph_layout_storage_key"), None)
         st.session_state.pop(self._k("layout_import_digest"), None)
+        st.session_state.pop(self._k("fill_missing_layout_positions"), None)
+        st.session_state.pop(self._k("prefer_saved_layout"), None)
+        st.session_state.pop(self._k("sync_layout_to_session"), None)
+        st.session_state.pop(self._k("layout_auto_sync_attempted"), None)
 
     def _get_saved_layout_for_payload(self) -> dict | None:
-        if st.session_state.get(self._k("graph_layout_storage_key")) != self._graph_layout_fingerprint():
-            return None
         positions = st.session_state.get(self._k("graph_layout_positions"))
         if not positions:
             return None
+        node_ids = self._graph_node_ids()
+        fp = self._graph_layout_fingerprint()
+        if st.session_state.get(self._k("graph_layout_storage_key")) != fp:
+            # Net grew/shrank: keep coords for IDs that still exist; drop the rest.
+            pruned = prune_layout_positions(node_ids, positions)
+            if not pruned:
+                return None
+            view = st.session_state.get(self._k("graph_layout_view"))
+            self._set_saved_layout_session(pruned, view)
+            if layout_has_position_gaps(node_ids, pruned):
+                st.session_state[self._k("fill_missing_layout_positions")] = True
+            positions = pruned
         saved: dict = {"positions": positions}
         view = st.session_state.get(self._k("graph_layout_view"))
         if view:
@@ -776,9 +792,46 @@ class CPNStreamlitVisualizer:
 
     def _layout_export_json(self) -> str:
         positions = {}
-        if st.session_state.get(self._k("graph_layout_storage_key")) == self._graph_layout_fingerprint():
-            positions = st.session_state.get(self._k("graph_layout_positions")) or {}
+        stored = st.session_state.get(self._k("graph_layout_positions")) or {}
+        if stored:
+            positions = prune_layout_positions(self._graph_node_ids(), stored)
         return json.dumps(build_layout_file_payload(positions), indent=2)
+
+    def _session_has_layout_positions(self) -> bool:
+        stored = st.session_state.get(self._k("graph_layout_positions")) or {}
+        return bool(prune_layout_positions(self._graph_node_ids(), stored))
+
+    def _request_layout_session_sync(self) -> None:
+        """Ask the graph iframe to push current positions into session_state."""
+        st.session_state[self._k("sync_layout_to_session")] = True
+
+    def _render_layout_export_controls(self, *, batch_running: bool) -> None:
+        """Export uses session coords; if empty, capture from the iframe first."""
+        if self._session_has_layout_positions():
+            st.download_button(
+                "Export graph layout",
+                data=self._layout_export_json(),
+                file_name="graph-layout.json",
+                mime="application/json",
+                key=self._k("export_graph_layout"),
+                disabled=batch_running,
+                use_container_width=True,
+                help="Download node positions (JSON: version + positions).",
+            )
+            return
+        if st.button(
+            "Export graph layout",
+            key=self._k("export_graph_layout_capture"),
+            disabled=batch_running,
+            use_container_width=True,
+            help="Capture the current graph positions, then click again to download.",
+            on_click=self._request_layout_session_sync,
+        ):
+            self._notify(
+                "Capturing graph positions from the canvas — click Export again to download.",
+                level="info",
+                dedup_id="layout_export",
+            )
 
     def _try_import_layout_file(self, uploaded) -> None:
         if uploaded is None:
@@ -798,11 +851,13 @@ class CPNStreamlitVisualizer:
             return
         node_ids = self._graph_node_ids()
         existing = st.session_state.get(self._k("graph_layout_positions"))
-        if st.session_state.get(self._k("graph_layout_storage_key")) != self._graph_layout_fingerprint():
-            existing = None
+        # Keep intersecting coords when the net fingerprint changed (e.g. new place).
+        existing = prune_layout_positions(node_ids, existing)
         merged = apply_imported_positions(node_ids, existing, imported)
         self._set_saved_layout_session(merged)
         st.session_state[self._k("prefer_saved_layout")] = True
+        if layout_has_position_gaps(node_ids, merged):
+            st.session_state[self._k("fill_missing_layout_positions")] = True
         st.session_state[self._k("layout_import_digest")] = digest
         applied = sum(1 for nid in node_ids if nid in imported)
         self._notify(
@@ -889,6 +944,18 @@ class CPNStreamlitVisualizer:
                 payload["saved_layout"] = saved_layout
             if st.session_state.pop(self._k("prefer_saved_layout"), False):
                 payload["prefer_saved_layout"] = True
+            if st.session_state.pop(self._k("fill_missing_layout_positions"), False):
+                payload["fill_missing_layout_positions"] = True
+            # One-shot sync: explicit export capture, or a single auto attempt when empty.
+            # Do not request sync on every remount while empty — that can loop via
+            # setComponentValue with jittery coordinates.
+            force_sync = st.session_state.pop(self._k("sync_layout_to_session"), False)
+            if force_sync:
+                payload["sync_layout_to_session"] = True
+            elif not self._session_has_layout_positions():
+                if not st.session_state.get(self._k("layout_auto_sync_attempted")):
+                    st.session_state[self._k("layout_auto_sync_attempted")] = True
+                    payload["sync_layout_to_session"] = True
         if st.session_state.pop(self._k("fit_graph_in_view"), False):
             payload["fit_in_view"] = True
             payload["fit_in_view_token"] = st.session_state.get(
@@ -1666,7 +1733,11 @@ class CPNStreamlitVisualizer:
             self._dismiss_status(dismiss_id)
             self._request_rerun()
         if layout:
+            had_positions = self._session_has_layout_positions()
             self._handle_graph_layout_sync(layout)
+            # Sidebar Export renders before the graph; refresh so capture→download flips.
+            if not had_positions and self._session_has_layout_positions():
+                self._request_rerun()
         self._handle_graph_component_pick(pick, enabled_names)
 
     def _show_animation_paint_pass(self) -> bool:
@@ -1895,23 +1966,14 @@ class CPNStreamlitVisualizer:
                     help="Clear saved positions and apply the layout strategy and spacing above.",
                 )
 
-                st.download_button(
-                    "Export graph layout",
-                    data=self._layout_export_json(),
-                    file_name="graph-layout.json",
-                    mime="application/json",
-                    key=self._k("export_graph_layout"),
-                    disabled=batch_running,
-                    use_container_width=True,
-                    help="Download node positions (JSON: version + positions).",
-                )
+                self._render_layout_export_controls(batch_running=batch_running)
                 uploaded_layout = st.file_uploader(
                     "Import graph layout",
                     type=["json"],
                     accept_multiple_files=False,
                     key=self._k("import_graph_layout"),
                     disabled=batch_running,
-                    help="Apply positions for matching node ids; unknown ids are ignored.",
+                    help="Apply positions for matching node ids; unknown ids ignored; gaps auto-placed.",
                 )
                 self._try_import_layout_file(uploaded_layout)
 
@@ -1927,7 +1989,8 @@ class CPNStreamlitVisualizer:
                         "and action details.\n"
                         "- **Layout strategy** and **Spacing %** apply on **Reset graph layout**.\n"
                         "- **Fit graph in view** adjusts pan/zoom only (layout unchanged).\n"
-                        "- **Export / Import graph layout** saves or restores node positions (JSON).\n"
+                        "- **Export / Import graph layout** saves or restores node positions (JSON). "
+                        "If Export asks twice, the first click captures the canvas into the session.\n"
                         "- **Monitors** pause simulation when their condition matches; "
                         "use **Fire** or **Start batch** to continue without disabling them."
                     )

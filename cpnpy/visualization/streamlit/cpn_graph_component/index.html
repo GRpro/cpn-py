@@ -637,6 +637,34 @@
                     statusEl.style.display = 'none';
                 }
 
+                function applyLayoutStrategy(nodes, edges, strategy, spread, cfg) {
+                    if (strategy === 'flow_lr') {
+                        assignFlowLRPositions(nodes, edges, spread, cfg);
+                    } else if (strategy === 'cluster') {
+                        assignClusterPositions(nodes, edges, spread, cfg);
+                    } else if (strategy === 'layered_lr') {
+                        assignLayeredLRPositions(nodes, edges, spread, cfg);
+                    } else {
+                        assignInitialPositions(nodes, spread);
+                    }
+                }
+
+                function nodesMissingPositions(nodes) {
+                    return (nodes || []).some(
+                        n => typeof n.x !== 'number' || typeof n.y !== 'number',
+                    );
+                }
+
+                function knownPositionMap(nodes) {
+                    const known = {};
+                    (nodes || []).forEach(n => {
+                        if (typeof n.x === 'number' && typeof n.y === 'number') {
+                            known[n.id] = { x: n.x, y: n.y };
+                        }
+                    });
+                    return known;
+                }
+
                 let loadedFromSave = false;
                 const sessionPositions = graphData.saved_layout && graphData.saved_layout.positions;
                 if (!graphData.clear_saved_layout) {
@@ -657,17 +685,18 @@
                     }
                 }
                 if (!loadedFromSave) {
-                    if (layoutStrategy === 'flow_lr') {
-                        assignFlowLRPositions(graphData.nodes, graphData.edges, layoutSpread, layoutCfg);
-                    } else if (layoutStrategy === 'cluster') {
-                        assignClusterPositions(graphData.nodes, graphData.edges, layoutSpread, layoutCfg);
-                    } else if (layoutStrategy === 'layered_lr') {
-                        assignLayeredLRPositions(
-                            graphData.nodes, graphData.edges, layoutSpread, layoutCfg,
-                        );
-                    } else {
-                        assignInitialPositions(graphData.nodes, layoutSpread);
-                    }
+                    applyLayoutStrategy(
+                        graphData.nodes, graphData.edges, layoutStrategy, layoutSpread, layoutCfg,
+                    );
+                } else if (
+                    graphData.fill_missing_layout_positions
+                    && nodesMissingPositions(graphData.nodes)
+                ) {
+                    const known = knownPositionMap(graphData.nodes);
+                    applyLayoutStrategy(
+                        graphData.nodes, graphData.edges, layoutStrategy, layoutSpread, layoutCfg,
+                    );
+                    applyPositionMap(graphData.nodes, known);
                 }
 
                 const usePhysics = !loadedFromSave && layoutStrategy === 'force';
@@ -794,6 +823,14 @@
                     }
                 }
 
+                function pushLayoutToSessionIfRequested() {
+                    if (!graphData.sync_layout_to_session) return;
+                    try {
+                        saveState();
+                        syncLayoutToStreamlit();
+                    } catch (e) {}
+                }
+
                 const nodesDS = new vis.DataSet(graphData.nodes);
                 const edgesDS = new vis.DataSet(graphData.edges);
                 const network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, options);
@@ -815,7 +852,15 @@
                     } else if (!loadedFromSave && !localStorage.getItem(STORAGE_KEY)) {
                         saveState();
                     }
+                    if (!usePhysics) {
+                        pushLayoutToSessionIfRequested();
+                    }
                 });
+                if (usePhysics) {
+                    network.once("stabilized", () => {
+                        pushLayoutToSessionIfRequested();
+                    });
+                }
                 if (layoutFitAfterDraw) {
                     network.once("afterDrawing", () => {
                         network.fit({ animation: false, padding: 50 });

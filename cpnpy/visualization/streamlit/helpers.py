@@ -629,13 +629,34 @@ def parse_layout_file_json(raw: str) -> dict[str, dict]:
     return out
 
 
+def prune_layout_positions(
+    node_ids: list[str],
+    positions: dict | None,
+) -> dict[str, dict]:
+    """Keep only coordinates for live node ids (survives net growth / shrink)."""
+    if not positions:
+        return {}
+    live = set(node_ids)
+    return {
+        node_id: coords
+        for node_id, coords in positions.items()
+        if node_id in live and isinstance(coords, dict)
+    }
+
+
+def layout_has_position_gaps(node_ids: list[str], positions: dict | None) -> bool:
+    """True when any live node lacks a saved coordinate."""
+    pos = positions or {}
+    return any(node_id not in pos for node_id in node_ids)
+
+
 def apply_imported_positions(
     node_ids: list[str],
     existing: dict | None,
     imported: dict,
 ) -> dict[str, dict]:
     """Merge imported coords for known ids; ignore unknown ids; keep others from existing."""
-    merged = dict(existing or {})
+    merged = prune_layout_positions(node_ids, existing)
     for node_id in node_ids:
         if node_id in imported:
             merged[node_id] = imported[node_id]
