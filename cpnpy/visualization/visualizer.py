@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import graphviz
 import html
 import tempfile
@@ -5,9 +7,14 @@ import os
 from cpnpy.cpn.cpn_imp import *
 import inspect
 
-def format_token(tok, token_max_len=200):
+def format_token(tok, token_max_len=200, *, include_timestamp: bool | None = None):
     """
     Produce a short, escaped summary of a single token (value + optional timestamp).
+
+    ``include_timestamp``:
+      - True: always append ``@timestamp`` (including ``@0``) — use for timed places
+      - False: never append a timestamp — use for untimed places
+      - None: append only when ``timestamp != 0`` (legacy Graphviz default)
     """
     # Convert token value to string
     raw_value_str = str(tok.value)
@@ -20,11 +27,13 @@ def format_token(tok, token_max_len=200):
     # Escape backslashes and newlines
     #escaped_value = escaped_value.replace("\\", "\\\\").replace("\n", "\\n")
 
-    # Append timestamp if present
+    if include_timestamp is True:
+        return f"{escaped_value}@{tok.timestamp}"
+    if include_timestamp is False:
+        return escaped_value
     if tok.timestamp != 0:
         return f"{escaped_value}@{tok.timestamp}"
-    else:
-        return escaped_value
+    return escaped_value
 
 
 def summarize_label(full_label: str, max_len: int = 10000) -> str:
@@ -71,8 +80,11 @@ class CPNGraphViz:
             token_str_list = []
 
             # Format each token in a safe, shortened way
+            timed = bool(getattr(place.colorset, "timed", False))
             for tok in ms.tokens:
-                token_str_list.append(format_token(tok))
+                token_str_list.append(
+                    format_token(tok, include_timestamp=timed)
+                )
 
             if token_str_list:
                 label = f"{place.name}\\nTokens: {', '.join(token_str_list)}"

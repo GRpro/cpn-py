@@ -66,8 +66,25 @@ def add(a, b):
     assert values == [30]
     assert delay == 0
 
-if __name__ == "__main__":
-    test_evaluate_input_arc_no_delay_parsing()
-    test_evaluate_output_arc_delay()
-    test_evaluate_output_arc_complex_expression()
-    test_evaluate_output_arc_function_call()
+def test_evaluate_output_arc_empty_list_means_no_tokens():
+    """Bare [] is zero tokens; [[]] deposits one empty-list token on list colorsets."""
+    from cpnpy.cpn.colorsets import ListColorSet
+
+    context = EvaluationContext()
+    list_cs = ListColorSet(IntegerColorSet())
+
+    values, delay = context.evaluate_output_arc("[]", {}, target_cs=list_cs)
+    assert values == []
+    assert delay == 0
+
+    values, delay = context.evaluate_output_arc("[[]]", {}, target_cs=list_cs)
+    assert values == [[]]
+    assert delay == 0
+
+    values, delay = context.evaluate_output_arc("[1, 2]", {}, target_cs=list_cs)
+    # Whole list is a valid ListColorSet token → one token [1, 2]
+    assert values == [[1, 2]]
+
+    values, delay = context.evaluate_output_arc("[1, 2]", {})
+    # Without target_cs, a Python list means multi-token production
+    assert values == [1, 2]

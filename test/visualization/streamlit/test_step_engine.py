@@ -237,3 +237,50 @@ def test_fire_transition_error_unknown():
     )
     assert result.kind == "error"
     assert result.error
+
+
+def test_macro_step_before_monitor_respects_priority():
+    """Lower-priority enabled transition must not trip its before-monitor."""
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn = CPN()
+    p1 = Place("P1", IntegerColorSet())
+    p2 = Place("P2", IntegerColorSet())
+    p3 = Place("P3", IntegerColorSet())
+    high = Transition("High", variables=["x"], priority=0)
+    low = Transition("Low", variables=["x"], priority=100)
+    cpn.add_place(p1)
+    cpn.add_place(p2)
+    cpn.add_place(p3)
+    cpn.add_transition(high)
+    cpn.add_transition(low)
+    cpn.add_arc(Arc(p1, high, "x"))
+    cpn.add_arc(Arc(high, p2, "x"))
+    cpn.add_arc(Arc(p1, low, "x"))
+    cpn.add_arc(Arc(low, p3, "x"))
+    marking = Marking()
+    marking.add_tokens("P1", [1])
+    ctx = EvaluationContext()
+
+    mon = MonitorSpec(
+        name="Low enabled",
+        slug=slugify_monitor_name("Low enabled"),
+        predicate=lambda c, m: True,
+        before=True,
+        transition_name="Low",
+        default_enabled=True,
+    )
+    result = run_batch_macro_step(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        monitors=[mon],
+        enabled_slugs=frozenset({mon.slug}),
+        config=BatchConfig(mode="steps", max_steps=10),
+        batch_firings=0,
+        stop_requested=False,
+    )
+    assert result.kind == "fired"
+    assert result.info.get("transition") == "High"
+    assert len(marking.get_multiset("P2").tokens) == 1
+    assert len(marking.get_multiset("P3").tokens) == 0

@@ -273,6 +273,12 @@ class EvaluationContext:
         namespace = self._binding_namespace(binding)
         val = eval(expr_part, namespace, namespace)
 
+        # Bare [] always means "produce no tokens". To deposit an empty list-typed
+        # token, use [[]]. Without this, ListColorSet.is_member([]) is True and
+        # conditional arcs accidentally write empty-list tokens.
+        if isinstance(val, list) and len(val) == 0:
+            return [], delay
+
         if target_cs and target_cs.is_member(val):
             return [val], delay
 
@@ -494,15 +500,27 @@ class CPN:
                                                            target_cs=arc.target.colorset)
             for v in values:
                 place = arc.target
-                if not place.colorset.is_member(v):
+                # Token wrappers carry absolute timestamps (CPN Tools @N). Plain
+                # values keep relative clock + transition_delay + arc_delay.
+                if isinstance(v, Token):
+                    token_value = v.value
+                    absolute_ts = v.timestamp
+                else:
+                    token_value = v
+                    absolute_ts = None
+
+                if not place.colorset.is_member(token_value):
                     raise ValueError(
-                        f"Token value {v!r} is not a member of colorset {place.colorset} "
+                        f"Token value {token_value!r} is not a member of colorset {place.colorset} "
                         f"for place {place.name}"
                     )
-                
-                new_timestamp = marking.global_clock + t.transition_delay + arc_delay
-                final_ts = new_timestamp if place.colorset.timed else 0
-                output_tokens.append((place.name, v, final_ts))
+
+                if absolute_ts is not None:
+                    final_ts = absolute_ts if place.colorset.timed else 0
+                else:
+                    new_timestamp = marking.global_clock + t.transition_delay + arc_delay
+                    final_ts = new_timestamp if place.colorset.timed else 0
+                output_tokens.append((place.name, token_value, final_ts))
 
         # 3. If everything is valid, perform atomic updates
         firing_info = {"in": [], "out": []}

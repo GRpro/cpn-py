@@ -401,7 +401,8 @@
                         let html = '<div style="margin-top:10px">' + summary + '</div><div style="margin-top:10px">';
                         node.full_tokens.forEach(t => {
                             const color = t.is_avail ? '#27ae60' : 'black';
-                            const ts = t.timestamp ? ' @' + t.timestamp : '';
+                            // Timed places always show @ts (including @0); untimed omit.
+                            const ts = node.is_timed ? ' @' + t.timestamp : '';
                             html += `<div class="token-row" style="color:${color}">${esc(t.value)}${ts}</div>`;
             });
                         if (!node.full_tokens.length) html += '<i>No tokens</i>';

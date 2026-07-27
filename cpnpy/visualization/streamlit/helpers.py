@@ -128,9 +128,11 @@ def evaluate_monitors(
         if m.before != want_before or m.slug not in enabled_slugs:
             continue
         if m.transition_name is not None:
-            if want_before and m.transition_name not in enabled_names:
+            # Gate on the transition about to fire / just fired so lower-priority
+            # enabled peers do not trip a transition-scoped before-monitor.
+            if m.transition_name != pending_transition:
                 continue
-            if not want_before and m.transition_name != pending_transition:
+            if want_before and m.transition_name not in enabled_names:
                 continue
         if m.predicate(cpn, marking):
             triggered.append(m.name)

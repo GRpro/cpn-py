@@ -544,11 +544,25 @@ def test_evaluate_monitors_before_drive_enabled():
         phase="before",
         cpn=None,
         marking=None,
-        pending_transition="execute_route.StartRoute",
+        pending_transition="execute_route.Drive",
         enabled_names=frozenset({"execute_route.Drive", "execute_route.StartRoute"}),
         enabled_slugs=frozenset({"drive_enabled"}),
     )
     assert names == ["Drive enabled"]
+
+
+def test_evaluate_monitors_before_ignores_lower_priority_peer():
+    """Before-monitor must not trip when another (higher-priority) transition is pending."""
+    monitors = [_drive_monitor()]
+    assert evaluate_monitors(
+        monitors,
+        phase="before",
+        cpn=None,
+        marking=None,
+        pending_transition="execute_route.StartRoute",
+        enabled_names=frozenset({"execute_route.Drive", "execute_route.StartRoute"}),
+        enabled_slugs=frozenset({"drive_enabled"}),
+    ) == []
 
 
 def test_evaluate_monitors_before_drive_not_enabled():
@@ -558,7 +572,7 @@ def test_evaluate_monitors_before_drive_not_enabled():
         phase="before",
         cpn=None,
         marking=None,
-        pending_transition="execute_route.StartRoute",
+        pending_transition="execute_route.Drive",
         enabled_names=frozenset({"execute_route.StartRoute"}),
         enabled_slugs=frozenset({"drive_enabled"}),
     ) == []

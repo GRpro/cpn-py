@@ -170,6 +170,60 @@ def test_fire_delays_accumulation():
     # 100 + 5 + 10 = 115
     assert marking.get_multiset("P2").tokens[0].timestamp == 115
 
+
+def test_fire_token_list_uses_absolute_timestamps():
+    """Token-wrapped output values deposit absolute timestamps (not clock+delay)."""
+    cpn = CPN()
+    p1 = Place("P1", IntegerColorSet(timed=True))
+    p2 = Place("P2", IntegerColorSet(timed=True))
+
+    def action(inp, out):
+        out.ys = [Token(10, 100), Token(20, 200)]
+
+    t1 = Transition("T1", variables=["x"], action=action, transition_delay=5)
+    cpn.add_place(p1)
+    cpn.add_place(p2)
+    cpn.add_transition(t1)
+    cpn.add_arc(Arc(p1, t1, "x"))
+    cpn.add_arc(Arc(t1, p2, "ys @+ 10"))
+
+    marking = Marking()
+    marking.add_tokens("P1", [1])
+    marking.global_clock = 50
+    context = EvaluationContext()
+    context.env["Token"] = Token
+
+    cpn.fire_transition(t1, marking, context)
+
+    tokens = sorted(marking.get_multiset("P2").tokens, key=lambda t: t.value)
+    assert [(t.value, t.timestamp) for t in tokens] == [(10, 100), (20, 200)]
+
+
+def test_fire_token_onto_untimed_place_zeros_timestamp():
+    cpn = CPN()
+    p1 = Place("P1", IntegerColorSet())
+    p2 = Place("P2", IntegerColorSet(timed=False))
+
+    def action(inp, out):
+        out.y = Token(7, 999)
+
+    t1 = Transition("T1", variables=["x"], action=action)
+    cpn.add_place(p1)
+    cpn.add_place(p2)
+    cpn.add_transition(t1)
+    cpn.add_arc(Arc(p1, t1, "x"))
+    cpn.add_arc(Arc(t1, p2, "y"))
+
+    marking = Marking()
+    marking.add_tokens("P1", [1])
+    context = EvaluationContext()
+    context.env["Token"] = Token
+    cpn.fire_transition(t1, marking, context)
+
+    tok = marking.get_multiset("P2").tokens[0]
+    assert tok.value == 7
+    assert tok.timestamp == 0
+
 def test_fire_error_handling():
     """Verify RuntimeError on invalid firing attempts."""
     cpn = CPN()
