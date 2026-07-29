@@ -194,10 +194,32 @@ class Marking:
 # -----------------------------------------------------------------------------------
 # EvaluationContext
 # -----------------------------------------------------------------------------------
+class GlobalMarkingView:
+    """Read-only view of the marking currently bound on an EvaluationContext."""
+
+    def __init__(self, context: "EvaluationContext"):
+        self._context = context
+
+    @property
+    def time(self) -> int:
+        marking = self._context._active_marking
+        if marking is None:
+            raise RuntimeError(
+                "global_marking.time requires an active marking; "
+                "call context.bind_marking(marking) before evaluation"
+            )
+        return marking.global_clock
+
+    @property
+    def global_clock(self) -> int:
+        return self.time
+
+
 class EvaluationContext:
     def __init__(self, user_code: Optional[Union[str, ModuleType]] = None):
         self.env = {}
         self._guard_errors: Dict[str, str] = {}
+        self._active_marking: Optional["Marking"] = None
         if user_code is not None:
             try:
                 if isinstance(user_code, str):
@@ -227,6 +249,14 @@ class EvaluationContext:
     @property
     def guard_errors(self) -> Dict[str, str]:
         return dict(self._guard_errors)
+
+    def bind_marking(self, marking: "Marking") -> None:
+        self._active_marking = marking
+
+    def install_global_marking(self) -> GlobalMarkingView:
+        view = GlobalMarkingView(self)
+        self.env["global_marking"] = view
+        return view
 
     def _binding_namespace(self, binding: Dict[str, Any]) -> Dict[str, Any]:
         """Merged globals/locals for eval — required for genexpr/comprehension scope in Py3."""
@@ -311,16 +341,24 @@ class EvaluationContext:
     def __copy__(self):
         cls = self.__class__
         result = cls.__new__(cls)
-        # Shallow copy environment
+        had_global_marking = "global_marking" in self.env
         result.env = self.env.copy()
+        result._guard_errors = self._guard_errors.copy()
+        result._active_marking = None
+        if had_global_marking:
+            result.install_global_marking()
         return result
 
     def __deepcopy__(self, memo):
         cls = self.__class__
         result = cls.__new__(cls)
         memo[id(self)] = result
-        # Deepcopy environment
+        had_global_marking = "global_marking" in self.env
         result.env = copy.deepcopy(self.env, memo)
+        result._guard_errors = copy.deepcopy(self._guard_errors, memo)
+        result._active_marking = None
+        if had_global_marking:
+            result.install_global_marking()
         return result
 
 
@@ -476,6 +514,7 @@ class CPN:
 
     def fire_transition(self, t: Transition, marking: Marking, context: EvaluationContext,
                         binding: Optional[Dict[str, Any]] = None):
+        context.bind_marking(marking)
         if binding is None:
             binding = self._find_binding(t, marking, context)
             if binding is None:
@@ -523,7 +562,7 @@ class CPN:
                 output_tokens.append((place.name, token_value, final_ts))
 
         # 3. If everything is valid, perform atomic updates
-        firing_info = {"in": [], "out": []}
+        firing_info = {"in": [], "out": [], "binding_after_action": locals_after_action}
         
         # Remove tokens
         for arc in self.get_input_arcs(t):
@@ -545,6 +584,7 @@ class CPN:
 
     def _check_enabled_with_binding(self, t: Transition, marking: Marking, context: EvaluationContext,
                                     binding: Dict[str, Any]) -> bool:
+        context.bind_marking(marking)
         if t.guard_expr:
             try:
                 if not context.evaluate_guard(t.guard_expr, binding):

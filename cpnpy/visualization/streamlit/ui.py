@@ -35,6 +35,7 @@ from cpnpy.visualization.streamlit.helpers import (
     format_simulation_error,
     format_simulation_metrics_row,
     get_action_source,
+    transition_overlay_arcs,
     estimate_place_ellipse_size,
     format_place_graph_label,
     format_transition_graph_label,
@@ -660,6 +661,7 @@ class CPNStreamlitVisualizer:
         label = format_transition_graph_label(trans.name, has_action=has_action)
         delay = getattr(trans, "transition_delay", 0)
         guard = trans.guard_expr or ""
+        in_arcs, out_arcs = transition_overlay_arcs(self.cpn, trans)
         if guard_error:
             trans_color = {
                 "background": "#f8d7da",
@@ -692,6 +694,8 @@ class CPNStreamlitVisualizer:
             "guard": guard,
             "delay": delay,
             "priority": trans.priority,
+            "in_arcs": in_arcs,
+            "out_arcs": out_arcs,
             "action_code": get_action_source(trans.action),
             "colorset_name": None,
             "full_tokens": None,
@@ -1985,8 +1989,8 @@ class CPNStreamlitVisualizer:
                         "to select it for firing.\n"
                         "- **Advance clock when idle** moves global time when nothing can fire "
                         "(Step and batch Steps).\n"
-                        "- **Click** a place or transition on the graph for tokens, guard, "
-                        "and action details.\n"
+                        "- **Click** a place or transition on the graph for tokens, arcs, "
+                        "guard, and action details.\n"
                         "- **Layout strategy** and **Spacing %** apply on **Reset graph layout**.\n"
                         "- **Fit graph in view** adjusts pan/zoom only (layout unchanged).\n"
                         "- **Export / Import graph layout** saves or restores node positions (JSON). "

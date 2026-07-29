@@ -38,6 +38,7 @@ from cpnpy.visualization.streamlit.helpers import (
     raise_if_invalid_net,
     resolve_layout_strategy,
     spacing_pct_to_spread_factor,
+    transition_overlay_arcs,
     validate_net_for_simulation,
     apply_imported_positions,
     apply_status_dismiss,
@@ -79,6 +80,42 @@ def test_format_transition_graph_label_without_action():
     assert format_transition_graph_label("a.b", has_action=False) == (
         "<b>a</b>\n<b>b</b>\n "
     )
+
+
+def test_transition_overlay_arcs_lists_input_and_output():
+    parser = ColorSetParser()
+    int_set = parser.parse_definitions("colset INT = int;")["INT"]
+    string_set = parser.parse_definitions("colset STRING = string;")["STRING"]
+    p_in = Place("P_In", int_set)
+    p_out = Place("P_Out", string_set)
+    t = Transition("T", variables=["x"])
+    cpn = CPN()
+    cpn.add_place(p_in)
+    cpn.add_place(p_out)
+    cpn.add_transition(t)
+    cpn.add_arc(Arc(p_in, t, "x"))
+    cpn.add_arc(Arc(t, p_out, "str(x)"))
+
+    in_arcs, out_arcs = transition_overlay_arcs(cpn, t)
+    assert in_arcs == [
+        {"place": "P_In", "token_type": "INT", "expression": "x"},
+    ]
+    assert out_arcs == [
+        {"place": "P_Out", "token_type": "STRING", "expression": "str(x)"},
+    ]
+
+
+def test_transition_overlay_arcs_empty_when_no_arcs():
+    parser = ColorSetParser()
+    int_set = parser.parse_definitions("colset INT = int;")["INT"]
+    t = Transition("T_Isolated")
+    cpn = CPN()
+    cpn.add_place(Place("P", int_set))
+    cpn.add_transition(t)
+
+    in_arcs, out_arcs = transition_overlay_arcs(cpn, t)
+    assert in_arcs == []
+    assert out_arcs == []
 
 
 def test_estimate_place_ellipse_size_grows_with_lines():

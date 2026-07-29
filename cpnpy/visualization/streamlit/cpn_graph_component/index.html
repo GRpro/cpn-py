@@ -1172,6 +1172,23 @@
                     }
                 }
 
+                function renderArcSection(title, arcs, direction) {
+                    let html = '<b>' + title + ':</b>';
+                    if (!arcs || !arcs.length) {
+                        html += ' <span style="font-weight:normal">none</span><br><br>';
+                        return html;
+                    }
+                    html += '<div style="margin-top:4px">';
+                    arcs.forEach(a => {
+                        const place = esc(a.place || '');
+                        const tokenType = esc(a.token_type || '');
+                        html += '<div>' + place + ': <i style="font-weight:normal">' + tokenType + '</i></div>';
+                        html += '<pre>' + esc(a.expression || '') + '</pre>';
+                    });
+                    html += '</div>';
+                    return html;
+                }
+
                 function showOverlay(node) {
                     const overlay = document.getElementById('overlay');
                     const title   = document.getElementById('overlay-title');
@@ -1181,21 +1198,23 @@
                         title.innerHTML = '<b>' + node.id + '</b>';
                         let html = '<div style="margin-top:10px">';
                         html += '<b>Priority:</b><pre>' + node.priority + '</pre>';
-                        if (node.guard) {
-                            html += '<b>Guard:</b><pre>' + esc(node.guard) + '</pre>';
-                        } else {
-                            html += '<b>Guard:</b> <span style="font-weight:normal">none</span><br><br>';
-                        }
                         if (node.delay > 0) {
                             html += '<b>Delay:</b><pre>@+ ' + node.delay + '</pre>';
                         } else {
                             html += '<b>Delay:</b> <span style="font-weight:normal">none</span><br><br>';
                         }
+                        html += renderArcSection('Input arcs', node.in_arcs);
+                        if (node.guard) {
+                            html += '<b>Guard:</b><pre>' + esc(node.guard) + '</pre>';
+                        } else {
+                            html += '<b>Guard:</b> <span style="font-weight:normal">none</span><br><br>';
+                        }
                         if (node.action_code) {
                             html += '<b>Action:</b><pre>' + esc(node.action_code) + '</pre>';
                         } else {
-                            html += '<b>Action:</b> <span style="font-weight:normal">none</span><br>';
+                            html += '<b>Action:</b> <span style="font-weight:normal">none</span><br><br>';
                         }
+                        html += renderArcSection('Output arcs', node.out_arcs);
                         html += '</div>';
                         content.innerHTML = html;
           } else {

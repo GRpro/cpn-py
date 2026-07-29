@@ -491,6 +491,31 @@ def get_action_source(action) -> str:
         return str(action)
 
 
+def transition_overlay_arcs(cpn, trans) -> tuple[list[dict], list[dict]]:
+    """Input/output arc payloads for the transition detail overlay.
+
+    Each entry is ``{"place", "token_type", "expression"}`` where ``token_type``
+    is the connected place's colorset name.
+    """
+    in_arcs = [
+        {
+            "place": arc.source.name,
+            "token_type": arc.source.colorset.name or "",
+            "expression": str(arc.expression),
+        }
+        for arc in cpn.get_input_arcs(trans)
+    ]
+    out_arcs = [
+        {
+            "place": arc.target.name,
+            "token_type": arc.target.colorset.name or "",
+            "expression": str(arc.expression),
+        }
+        for arc in cpn.get_output_arcs(trans)
+    ]
+    return in_arcs, out_arcs
+
+
 def animation_draw_count(raw_count: int) -> int:
     """Circles to animate on one arc (1 when badge mode, else up to MAX_ANIMATED_TOKENS)."""
     count = max(1, int(raw_count) if raw_count else 1)
