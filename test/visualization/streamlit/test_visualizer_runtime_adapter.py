@@ -333,3 +333,29 @@ def test_layout_sync_empty_to_filled_requests_rerun(st_session, monkeypatch):
     v._render_graph_panel(height=400, enabled_names=[], last_fired={})
     v._request_rerun.assert_not_called()
     assert session[v._k("graph_layout_positions")]
+
+
+def test_sync_guard_error_status_messages_notify_and_clear(st_session):
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="guard_err_sync",
+    )
+    v._init_session_defaults()
+    ctx.record_guard_error("T1", ValueError("bad guard"))
+    ctx.record_guard_error("T2", RuntimeError("boom"))
+
+    v._sync_guard_error_status_messages()
+
+    store = session[v._k("status_messages")]
+    assert store["guard_error:T1"]["message"] == (
+        "Guard evaluation failed for T1 — ValueError: bad guard"
+    )
+    assert store["guard_error:T2"]["level"] == "error"
+
+    ctx.clear_guard_errors()
+    ctx.record_guard_error("T1", ValueError("still bad"))
+    v._sync_guard_error_status_messages()
+
+    assert "guard_error:T2" not in store
+    assert "still bad" in store["guard_error:T1"]["message"]

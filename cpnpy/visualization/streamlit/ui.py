@@ -412,6 +412,26 @@ class CPNStreamlitVisualizer:
         else:
             self._clear_status_slot("batch_status")
 
+        self._sync_guard_error_status_messages()
+
+    def _sync_guard_error_status_messages(self) -> None:
+        """Mirror context.guard_errors into overlay notifications (clear stale slots)."""
+        prefix = "guard_error:"
+        active = self.context.guard_errors
+        for name, message in sorted(active.items()):
+            self._notify(
+                f"Guard evaluation failed for {name} — {message}",
+                level="error",
+                dedup_id=f"{prefix}{name}",
+            )
+        store = st.session_state.get(self._k("status_messages")) or {}
+        for dedup_id in list(store):
+            if not isinstance(dedup_id, str) or not dedup_id.startswith(prefix):
+                continue
+            name = dedup_id[len(prefix):]
+            if name not in active:
+                self._clear_status_slot(dedup_id)
+
     def _graph_notifications(self) -> list[dict]:
         return visible_status_notifications(
             st.session_state.get(self._k("status_messages")),
@@ -649,9 +669,9 @@ class CPNStreamlitVisualizer:
         trans,
         enabled_names: list[str],
         animating_transition: str | None,
-        guard_error_names: list[str] | None = None,
+        guard_error_names: set[str] | list[str] | None = None,
     ) -> dict:
-        guard_error_names = guard_error_names or []
+        guard_error_names = guard_error_names or set()
         guard_error = trans.name in guard_error_names
         enabled = (
             trans.name in enabled_names
@@ -875,18 +895,19 @@ class CPNStreamlitVisualizer:
                       animate_out: list[dict] | None = None,
                       animation_timings: dict[str, int] | None = None,
                       animating_transition: str | None = None,
-                      guard_error_names: list[str] | None = None):
+                      guard_error_names: set[str] | list[str] | None = None):
         animate_in = normalize_animation_arcs(animate_in or [])
         animate_out = normalize_animation_arcs(animate_out or [])
         graph_marking = self._graph_marking()
         now = graph_marking.global_clock
+        guard_errors = set(guard_error_names or ())
         nodes = [
             self._place_node(place, now)
             for place in self.cpn.places
         ]
         nodes.extend(
             self._transition_node(
-                trans, enabled_names, animating_transition, guard_error_names,
+                trans, enabled_names, animating_transition, guard_errors,
             )
             for trans in self.cpn.transitions
         )
@@ -930,7 +951,7 @@ class CPNStreamlitVisualizer:
             "animate_out": animate_out,
             "animation": timings,
             "enabled_names": enabled_names,
-            "guard_error_names": guard_error_names or [],
+            "guard_error_names": list(guard_errors),
             "animating_transition": animating_transition,
             "layout": layout,
             "sync_graph_select": (
@@ -1715,7 +1736,7 @@ class CPNStreamlitVisualizer:
         height: int,
         enabled_names: list[str],
         last_fired: dict,
-        guard_error_names: list[str] | None = None,
+        guard_error_names: set[str] | list[str] | None = None,
     ) -> None:
         timings = compute_animation_timings(self._effective_anim_ms())
         self._last_animation_timings = timings
@@ -1864,7 +1885,7 @@ class CPNStreamlitVisualizer:
         self._run_pre_sidebar_drivers(transitions_enabled=bool(enabled))
         self._flush_rerun()
 
-        guard_error_names = list(self.context.guard_error_names)
+        guard_error_names = set(self.context.guard_errors)
         self._refresh_deadlock_flags(enabled_names)
 
         batch_running = self._batch_running()

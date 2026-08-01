@@ -154,7 +154,7 @@ Transitions may also set `transition_delay=N` for transition-level timing. The s
 
 ### Guard evaluation errors
 
-If a guard raises an exception, the transition is treated as disabled and its name is recorded in `context.guard_error_names`. In the graph, such transitions appear **red**. Click the transition to open the detail overlay and inspect the guard expression; fix the model or user code accordingly.
+If a guard raises an exception, the transition is treated as disabled and its name is recorded in `context.guard_error_names`. In the graph, such transitions appear **red**, and an overlay notification shows the error message. Click the transition to open the detail overlay and inspect the guard expression; fix the model or user code accordingly.
 
 ### Net validation before simulation
 
