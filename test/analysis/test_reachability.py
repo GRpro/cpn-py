@@ -102,6 +102,39 @@ def test_reachability_timed_advancement():
             found_fired = True
     assert found_fired
 
+def test_reachability_respects_priority():
+    """Lower-priority transitions do not appear as RG edges while a better one is enabled."""
+    cpn = CPN()
+    source = Place("P", IntegerColorSet())
+    sink = Place("Sink", IntegerColorSet())
+    high = Transition("High", variables=["x"], priority=0)
+    low = Transition("Low", variables=["x"], priority=10)
+
+    cpn.add_place(source)
+    cpn.add_place(sink)
+    cpn.add_transition(high)
+    cpn.add_transition(low)
+    cpn.add_arc(Arc(source, high, "x"))
+    cpn.add_arc(Arc(high, sink, "x"))
+    cpn.add_arc(Arc(source, low, "x"))
+    cpn.add_arc(Arc(low, sink, "x + 100"))
+
+    marking = Marking()
+    marking.add_tokens("P", [1])
+
+    RG = build_reachability_graph(cpn, marking, EvaluationContext())
+    fired = {data["transition"] for _, _, data in RG.edges(data=True)}
+    assert fired == {"High"}
+
+    sink_values = []
+    for node in RG.nodes:
+        sink_values.extend(
+            token.value for token in RG.nodes[node]["marking"].get_multiset("Sink").tokens
+        )
+    assert 1 in sink_values
+    assert 101 not in sink_values
+
+
 def test_equiv_marking_to_key():
     """Verify that equivalent markings produce the same key."""
     m1 = Marking()
