@@ -48,6 +48,37 @@ def test_simulate_cpn_to_ocel_uses_action_output_vars():
     assert "20" in oids
 
 
+def test_simulate_cpn_to_ocel_skips_named_object_types():
+    cpn = CPN()
+    p_init = Place("Init", IntegerColorSet())
+    p_map = Place("Map", IntegerColorSet(name="ROUTES"))
+    p_out = Place("Out", IntegerColorSet())
+
+    t = Transition(name="Drive", variables=["i", "rts"])
+    cpn.add_place(p_init)
+    cpn.add_place(p_map)
+    cpn.add_place(p_out)
+    cpn.add_transition(t)
+    cpn.add_arc(Arc(p_init, t, "i"))
+    cpn.add_arc(Arc(p_map, t, "rts"))
+    cpn.add_arc(Arc(t, p_out, "i"))
+
+    marking = Marking()
+    marking.set_tokens("Init", [1])
+    marking.set_tokens("Map", [list(range(50))])
+    context = EvaluationContext()
+
+    ocel = simulate_cpn_to_ocel(
+        cpn,
+        marking,
+        context,
+        skip_object_types={"ROUTES"},
+    )
+    oids = set(ocel.objects["ocel:oid"].astype(str))
+    assert "1" in oids
+    assert not any(oid.startswith("[") for oid in oids)
+
+
 def test_fire_transition_returns_binding_after_action():
     cpn = CPN()
     p_init = Place("Init", IntegerColorSet())

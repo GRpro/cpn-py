@@ -5,14 +5,23 @@ import random
 from pm4py.objects.ocel.obj import OCEL
 
 
-def simulate_cpn_to_ocel(cpn: CPN, initial_marking: Marking, context: EvaluationContext) -> OCEL:
+def simulate_cpn_to_ocel(
+    cpn: CPN,
+    initial_marking: Marking,
+    context: EvaluationContext,
+    *,
+    skip_object_types=None,
+) -> OCEL:
     """
     Simulate the given CPN starting from the given initial marking, and return an OCEL object.
     Each fired transition is recorded as an event.
     Input and output tokens for each event are considered as related objects.
     The object type is derived from the place's color set.
+
+    ``skip_object_types`` omits those color-set names (e.g. ``ROUTES``) from the log.
     """
     marking = copy.deepcopy(initial_marking)
+    skip_types = {str(name) for name in (skip_object_types or ())}
 
     # Data structures to build the OCEL
     event_list = []
@@ -78,9 +87,10 @@ def simulate_cpn_to_ocel(cpn: CPN, initial_marking: Marking, context: Evaluation
         for arc in cpn.get_input_arcs(t):
             values, _ = context.evaluate_input_arc(arc.expression, binding)
             otype = get_object_type_from_colorset(arc.source)  # derive from source place's color set
+            if otype in skip_types:
+                continue
             for v in values:
-                obj_id = make_object_id(v)
-                related_objects.add((obj_id, otype))
+                related_objects.add((make_object_id(v), otype))
 
         # Fire once; reuse post-action locals for output arcs (do not re-run the action).
         firing_info = cpn.fire_transition(t, marking, context, binding)
@@ -92,9 +102,10 @@ def simulate_cpn_to_ocel(cpn: CPN, initial_marking: Marking, context: Evaluation
                 arc.expression, locals_after_action, target_cs=arc.target.colorset
             )
             otype = get_object_type_from_colorset(arc.target)  # derive from target place's color set
+            if otype in skip_types:
+                continue
             for v in values:
-                obj_id = make_object_id(v)
-                related_objects.add((obj_id, otype))
+                related_objects.add((make_object_id(v), otype))
 
         # Event ID
         eid = f"e_{event_counter}"
