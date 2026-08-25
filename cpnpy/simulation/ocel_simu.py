@@ -50,10 +50,13 @@ def simulate_cpn_to_ocel(cpn: CPN, initial_marking: Marking, context: Evaluation
                 # After advancing clock, check again
                 continue
 
-        # Fire an arbitrary enabled transition
-        t = enabled_transitions[0]
+        # Lower value => higher priority. Only choose among best-priority transitions.
+        best_pri = min(getattr(t, "priority", 0) for t in enabled_transitions)
+        best = [t for t in enabled_transitions if getattr(t, "priority", 0) == best_pri]
 
-        # Determine the actual binding used to fire
+        # choose one (random among ties to avoid bias)
+        t = random.choice(best)
+
         binding = cpn._find_binding(t, marking, context)
         if binding is None:
             # If no binding found, skip (should be rare)
@@ -69,20 +72,25 @@ def simulate_cpn_to_ocel(cpn: CPN, initial_marking: Marking, context: Evaluation
         # Identify related objects from input and output arcs
         related_objects = set()
 
+        context.bind_marking(marking)
+
         # For input arcs
         for arc in cpn.get_input_arcs(t):
-            values, _ = context.evaluate_arc(arc.expression, binding)
+            values, _ = context.evaluate_input_arc(arc.expression, binding)
             otype = get_object_type_from_colorset(arc.source)  # derive from source place's color set
             for v in values:
                 obj_id = make_object_id(v)
                 related_objects.add((obj_id, otype))
 
-        # Fire transition (this will modify the marking)
-        cpn.fire_transition(t, marking, context, binding)
+        # Fire once; reuse post-action locals for output arcs (do not re-run the action).
+        firing_info = cpn.fire_transition(t, marking, context, binding)
+        locals_after_action = firing_info.get("binding_after_action", binding)
 
-        # For output arcs
+        # For output arcs (may reference action-produced names like rp0)
         for arc in cpn.get_output_arcs(t):
-            values, arc_delay = context.evaluate_arc(arc.expression, binding)
+            values, _ = context.evaluate_output_arc(
+                arc.expression, locals_after_action, target_cs=arc.target.colorset
+            )
             otype = get_object_type_from_colorset(arc.target)  # derive from target place's color set
             for v in values:
                 obj_id = make_object_id(v)

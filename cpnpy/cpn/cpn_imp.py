@@ -1,45 +1,83 @@
 import copy
+import types
 from collections import Counter
-from typing import Optional, Union
+from dataclasses import dataclass, field
+from types import ModuleType
 from cpnpy.cpn.colorsets import *
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Union, Callable
+from cpnpy.cpn.parser import InputArcParser
+
+
+def format_exception_oneline(exc: BaseException) -> str:
+    """Compact 'TypeName: message' for user-facing error surfaces."""
+    return f"{type(exc).__name__}: {exc}"
+
+
+class InputView:
+    def __init__(self, data: dict):
+        self._data = data
+
+    def __getattr__(self, name: str):
+        if name in self._data:
+            return self._data[name]
+        raise AttributeError(name)
+
+    def get(self, name: str, default=None):
+        return self._data.get(name, default)
+
+
+class OutputScope:
+    def __init__(self):
+        self._data = {}
+
+    def __getattr__(self, name: str):
+        if name in self._data:
+            return self._data[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value):
+        if name == "_data":
+            super().__setattr__(name, value)
+        else:
+            self._data[name] = value
+
+    def __setitem__(self, key: str, value: Any):
+        self._data[key] = value
+
+    def as_dict(self) -> dict:
+        return dict(self._data)
+
+
+TransitionAction = Union[Callable[[InputView, OutputScope], None], str]
 
 
 # -----------------------------------------------------------------------------------
 # Token with Time
 # -----------------------------------------------------------------------------------
+@dataclass(frozen=True)
 class Token:
-    def __init__(self, value: Any, timestamp: int = 0):
-        self.value = value
-        self.timestamp = timestamp  # For timed tokens
+    value: Any
+    timestamp: int = 0 # For timed tokens
 
     def __repr__(self):
         if self.timestamp != 0:
-            return f"Token({self.value}, t={self.timestamp})"
+            return f"Token({self.value}, timestamp={self.timestamp})"
         return f"Token({self.value})"
+
 
     def __copy__(self):
         # Shallow copy: values assumed to be immutable or just referenced
-        cls = self.__class__
-        result = cls.__new__(cls)
-        result.value = self.value
-        result.timestamp = self.timestamp
-        return result
+        return self  # immutable
 
     def __deepcopy__(self, memo):
-        cls = self.__class__
-        result = cls.__new__(cls)
-        memo[id(self)] = result
         # Deepcopy value (in case it's a complex object)
-        result.value = copy.deepcopy(self.value, memo)
-        result.timestamp = self.timestamp
-        return result
+        return Token(copy.deepcopy(self.value, memo), self.timestamp)
 
 
+@dataclass
 class Multiset:
-    def __init__(self, tokens: Optional[List[Token]] = None):
-        if tokens is None:
-            tokens = []
-        self.tokens = tokens
+    tokens: List[Token] = field(default_factory=list)
 
     def add(self, token_value: Any, timestamp: int = 0, count: int = 1):
         for _ in range(count):
@@ -123,6 +161,10 @@ class Marking:
     def get_multiset(self, place_name: str) -> Multiset:
         return self._marking.get(place_name, Multiset())
 
+    def marked_place_names(self):
+        """Names of places that currently have a marking entry."""
+        return self._marking.keys()
+
     def __repr__(self):
         lines = [f"Marking (global_clock={self.global_clock}):"]
         for place, ms in self._marking.items():
@@ -152,45 +194,171 @@ class Marking:
 # -----------------------------------------------------------------------------------
 # EvaluationContext
 # -----------------------------------------------------------------------------------
+class GlobalMarkingView:
+    """Read-only view of the marking currently bound on an EvaluationContext."""
+
+    def __init__(self, context: "EvaluationContext"):
+        self._context = context
+
+    @property
+    def time(self) -> int:
+        marking = self._context._active_marking
+        if marking is None:
+            raise RuntimeError(
+                "global_marking.time requires an active marking; "
+                "call context.bind_marking(marking) before evaluation"
+            )
+        return marking.global_clock
+
+    @property
+    def global_clock(self) -> int:
+        return self.time
+
+
 class EvaluationContext:
-    def __init__(self, user_code: Optional[str] = None):
+    def __init__(self, user_code: Optional[Union[str, ModuleType]] = None):
         self.env = {}
+        self._guard_errors: Dict[str, str] = {}
+        self._active_marking: Optional["Marking"] = None
         if user_code is not None:
-            exec(user_code, self.env)
+            try:
+                if isinstance(user_code, str):
+                    exec(user_code, self.env)
+                elif isinstance(user_code, ModuleType):
+                    self.env.update(user_code.__dict__)
+                else:
+                    raise TypeError(
+                        f"user_code must be str or ModuleType, got {type(user_code).__name__}"
+                    )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to load evaluation context user code: "
+                    f"{format_exception_oneline(e)}"
+                ) from e
+
+    def clear_guard_errors(self) -> None:
+        self._guard_errors.clear()
+
+    def record_guard_error(self, transition_name: str, exc: BaseException) -> None:
+        self._guard_errors[transition_name] = format_exception_oneline(exc)
+
+    @property
+    def guard_error_names(self) -> list[str]:
+        return list(self._guard_errors.keys())
+
+    @property
+    def guard_errors(self) -> Dict[str, str]:
+        return dict(self._guard_errors)
+
+    def bind_marking(self, marking: "Marking") -> None:
+        self._active_marking = marking
+
+    def install_global_marking(self) -> GlobalMarkingView:
+        view = GlobalMarkingView(self)
+        self.env["global_marking"] = view
+        return view
+
+    def _binding_namespace(self, binding: Dict[str, Any]) -> Dict[str, Any]:
+        """Merged globals/locals for eval — required for genexpr/comprehension scope in Py3."""
+        return {**self.env, **binding}
 
     def evaluate_guard(self, guard_expr: Optional[str], binding: Dict[str, Any]) -> bool:
         if guard_expr is None:
             return True
-        return bool(eval(guard_expr, self.env, binding))
+        namespace = self._binding_namespace(binding)
+        return bool(eval(guard_expr, namespace, namespace))
 
-    def evaluate_arc(self, arc_expr: str, binding: Dict[str, Any]) -> (List[Any], int):
+    def _parse_expr_and_delay(self, arc_expr: str, binding: Dict[str, Any]) -> (str, int):
         delay = 0
+        expr_part = arc_expr
+        namespace = self._binding_namespace(binding)
         if "@+" in arc_expr:
             parts = arc_expr.split('@+')
             expr_part = parts[0].strip()
             delay_part = parts[1].strip()
-            val = eval(expr_part, self.env, binding)
-            delay = eval(delay_part, self.env, binding)
+            # Delay is usually a simple expression or number
+            delay = eval(delay_part, namespace, namespace)
+        return expr_part, delay
+
+    def evaluate_input_arc(self, arc_expr: str, binding: Dict[str, Any]) -> (List[Any], int):
+        expr_part = arc_expr
+        delay = 0
+
+        from cpnpy.cpn.parser import InputArcParser
+        parser = InputArcParser()
+        
+        parsed = parser.parse(expr_part)
+
+        val = binding[parsed.variable]
+
+        if parsed.is_multiset:
+            return val, delay
         else:
-            val = eval(arc_expr, self.env, binding)
+            return [val], delay
+
+
+    def evaluate_output_arc(self, arc_expr: str, binding: Dict[str, Any], 
+                            target_cs: Optional[ColorSet] = None) -> (List[Any], int):
+        expr_part, delay = self._parse_expr_and_delay(arc_expr, binding)
+        namespace = self._binding_namespace(binding)
+        val = eval(expr_part, namespace, namespace)
+
+        # Bare [] always means "produce no tokens". To deposit an empty list-typed
+        # token, use [[]]. Without this, ListColorSet.is_member([]) is True and
+        # conditional arcs accidentally write empty-list tokens.
+        if isinstance(val, list) and len(val) == 0:
+            return [], delay
+
+        if target_cs and target_cs.is_member(val):
+            return [val], delay
 
         if isinstance(val, list):
             return val, delay
         return [val], delay
 
+    def evaluate_action(self, action: TransitionAction, binding: Dict[str, Any]):
+        inp = InputView(binding)
+        out = OutputScope()
+
+        if isinstance(action, str):
+            # Execute string action in the environment with inp, out and binding variables
+            local_vars = {"input": inp, "output": out}
+            local_vars.update(binding)
+            exec(action, self.env, local_vars)
+            return out
+
+        # --- rebind function so its globals == self.env ---
+        action_with_env = types.FunctionType(
+            action.__code__,
+            self.env,
+            name=action.__name__,
+            argdefs=action.__defaults__,
+            closure=action.__closure__,
+        )
+        action_with_env(inp, out)
+        return out
+
     def __copy__(self):
         cls = self.__class__
         result = cls.__new__(cls)
-        # Shallow copy environment
+        had_global_marking = "global_marking" in self.env
         result.env = self.env.copy()
+        result._guard_errors = self._guard_errors.copy()
+        result._active_marking = None
+        if had_global_marking:
+            result.install_global_marking()
         return result
 
     def __deepcopy__(self, memo):
         cls = self.__class__
         result = cls.__new__(cls)
         memo[id(self)] = result
-        # Deepcopy environment
+        had_global_marking = "global_marking" in self.env
         result.env = copy.deepcopy(self.env, memo)
+        result._guard_errors = copy.deepcopy(self._guard_errors, memo)
+        result._active_marking = None
+        if had_global_marking:
+            result.install_global_marking()
         return result
 
 
@@ -223,18 +391,32 @@ class Place:
         return result
 
 
+
+# -------------------------
+# Transition
+# -------------------------
 class Transition:
-    def __init__(self, name: str, guard: Optional[str] = None, variables: Optional[List[str]] = None,
-                 transition_delay: int = 0):
+    def __init__(
+        self,
+        name: str,
+        guard: Optional[str] = None,
+        variables: Optional[List[str]] = None,
+        action: Optional[TransitionAction] = None,
+        transition_delay: int = 0,
+        priority: int = 0,  # lower value => higher priority
+    ):
         self.name = name
         self.guard_expr = guard
         self.variables = variables if variables else []
+        self.action = action
         self.transition_delay = transition_delay
+        self.priority = int(priority)
 
     def __repr__(self):
-        guard_str = self.guard_expr if self.guard_expr is not None else "None"
-        vars_str = ", ".join(self.variables) if self.variables else "None"
-        return f"Transition(name='{self.name}', guard='{guard_str}', variables=[{vars_str}], delay={self.transition_delay})"
+        guard_str = repr(self.guard_expr) if self.guard_expr is not None else "None"
+        vars_str = f'[' + ", ".join(map(lambda v: "'" + v + "'", self.variables)) + ']' if self.variables else "None"
+        action_str = repr(self.action) if self.action is not None else "None"
+        return f"Transition(name='{self.name}', guard={guard_str}, variables={vars_str}, action={action_str}, transition_delay={self.transition_delay}, priority={self.priority})"
 
     def __copy__(self):
         cls = self.__class__
@@ -242,7 +424,9 @@ class Transition:
         result.name = self.name
         result.guard_expr = self.guard_expr
         result.variables = self.variables[:]
+        result.action = self.action
         result.transition_delay = self.transition_delay
+        result.priority = self.priority
         return result
 
     def __deepcopy__(self, memo):
@@ -252,7 +436,9 @@ class Transition:
         result.name = copy.deepcopy(self.name, memo)
         result.guard_expr = copy.deepcopy(self.guard_expr, memo)
         result.variables = copy.deepcopy(self.variables, memo)
+        result.action = copy.deepcopy(self.action, memo)
         result.transition_delay = self.transition_delay
+        result.priority = copy.deepcopy(self.priority, memo)
         return result
 
 
@@ -265,7 +451,7 @@ class Arc:
     def __repr__(self):
         src_name = self.source.name if isinstance(self.source, Place) else self.source.name
         tgt_name = self.target.name if isinstance(self.target, Place) else self.target.name
-        return f"Arc(source='{src_name}', target='{tgt_name}', expr='{self.expression}')"
+        return f"Arc(source='{src_name}', target='{tgt_name}', expression='{self.expression}')"
 
     def __copy__(self):
         cls = self.__class__
@@ -328,6 +514,7 @@ class CPN:
 
     def fire_transition(self, t: Transition, marking: Marking, context: EvaluationContext,
                         binding: Optional[Dict[str, Any]] = None):
+        context.bind_marking(marking)
         if binding is None:
             binding = self._find_binding(t, marking, context)
             if binding is None:
@@ -335,30 +522,79 @@ class CPN:
         if not self._check_enabled_with_binding(t, marking, context, binding):
             raise RuntimeError(f"Transition {t.name} is not enabled under the found binding.")
 
-        # Remove tokens
-        for arc in self.get_input_arcs(t):
-            values, _ = context.evaluate_arc(arc.expression, binding)
-            marking.remove_tokens(arc.source.name, values)
+        # 1. Execute action if any
+        out = None
+        if t.action is not None:
+            out = context.evaluate_action(t.action, binding)
 
-        # Add tokens with proper timestamps
+        # 2. Prepare output tokens (risky part)
+        locals_after_action = {}
+        locals_after_action.update(binding)
+        if out is not None:
+            locals_after_action.update(out.as_dict())
+        
+        output_tokens = [] # List of (place_name, value, final_ts)
         for arc in self.get_output_arcs(t):
-            values, arc_delay = context.evaluate_arc(arc.expression, binding)
+            values, arc_delay = context.evaluate_output_arc(arc.expression, locals_after_action, 
+                                                           target_cs=arc.target.colorset)
             for v in values:
                 place = arc.target
-                new_timestamp = marking.global_clock + t.transition_delay + arc_delay
-                if place.colorset.timed:
-                    marking.add_tokens(place.name, [v], timestamp=new_timestamp)
+                # Token wrappers carry absolute timestamps (CPN Tools @N). Plain
+                # values keep relative clock + transition_delay + arc_delay.
+                if isinstance(v, Token):
+                    token_value = v.value
+                    absolute_ts = v.timestamp
                 else:
-                    marking.add_tokens(place.name, [v], timestamp=0)
+                    token_value = v
+                    absolute_ts = None
+
+                if not place.colorset.is_member(token_value):
+                    raise ValueError(
+                        f"Token value {token_value!r} is not a member of colorset {place.colorset} "
+                        f"for place {place.name}"
+                    )
+
+                if absolute_ts is not None:
+                    final_ts = absolute_ts if place.colorset.timed else 0
+                else:
+                    new_timestamp = marking.global_clock + t.transition_delay + arc_delay
+                    final_ts = new_timestamp if place.colorset.timed else 0
+                output_tokens.append((place.name, token_value, final_ts))
+
+        # 3. If everything is valid, perform atomic updates
+        firing_info = {"in": [], "out": [], "binding_after_action": locals_after_action}
+        
+        # Remove tokens
+        for arc in self.get_input_arcs(t):
+            values, _ = context.evaluate_input_arc(arc.expression, binding)
+            marking.remove_tokens(arc.source.name, values)
+            firing_info["in"].append({"arc": f"{arc.source.name}|{arc.target.name}", "count": len(values)})
+
+        # Add tokens
+        # We need to track it by arc
+        for arc in self.get_output_arcs(t):
+            values, arc_delay = context.evaluate_output_arc(arc.expression, locals_after_action, 
+                                                           target_cs=arc.target.colorset)
+            firing_info["out"].append({"arc": f"{arc.source.name}|{arc.target.name}", "count": len(values)})
+
+        for place_name, v, ts in output_tokens:
+            marking.add_tokens(place_name, [v], timestamp=ts)
+            
+        return firing_info
 
     def _check_enabled_with_binding(self, t: Transition, marking: Marking, context: EvaluationContext,
                                     binding: Dict[str, Any]) -> bool:
+        context.bind_marking(marking)
         if t.guard_expr:
-            if not context.evaluate_guard(t.guard_expr, binding):
+            try:
+                if not context.evaluate_guard(t.guard_expr, binding):
+                    return False
+            except Exception as exc:
+                context.record_guard_error(t.name, exc)
                 return False
         # Check input arcs and timestamps
         for arc in self.get_input_arcs(t):
-            values, _ = context.evaluate_arc(arc.expression, binding)
+            values, _ = context.evaluate_input_arc(arc.expression, binding)
             place_marking = marking.get_multiset(arc.source.name)
             # Check if we have enough ready tokens (timestamp <= global_clock)
             for val in values:
@@ -369,75 +605,196 @@ class CPN:
         return True
 
     def _find_binding(self, t: Transition, marking: Marking, context: EvaluationContext) -> Optional[Dict[str, Any]]:
-        variables = t.variables
+        parser = InputArcParser()
+        
+        # 1. Parse all input arcs to determine where variables come from
+        # Map: variable_name -> list of (place_name, count, is_multiset)
+        var_sources = defaultdict(list)
         input_arcs = self.get_input_arcs(t)
-
-        # Gather candidate tokens from input places that are ready
-        token_pool = []
+        
         for arc in input_arcs:
-            place_tokens = marking.get_multiset(arc.source.name).tokens
-            candidate_tokens = [tok for tok in place_tokens if tok.timestamp <= marking.global_clock]
-            token_pool.extend(candidate_tokens)
+            parsed = parser.parse(arc.expression)
+            var_sources[parsed.variable].append({
+                'place': arc.source.name,
+                'count': parsed.count,
+                'is_multiset': parsed.is_multiset
+            })
 
-        return self._backtrack_binding(variables, token_pool, context, t, marking, {}, set())
+        # We will backtrack over variables
+        return self._backtrack_binding_v2(t.variables, var_sources, marking, context, t, {}, {})
 
-    def _backtrack_binding(self, variables: List[str], token_pool: List[Token], context: EvaluationContext,
-                           t: Transition, marking: Marking, partial_binding: Dict[str, Any],
-                           used_indices: set) -> Optional[Dict[str, Any]]:
+    def _backtrack_binding_v2(self, variables: List[str], var_sources: Dict[str, List[dict]], 
+                              marking: Marking, context: EvaluationContext, t: Transition, 
+                              partial_binding: Dict[str, Any], used_tokens_map: Dict[str, Set[int]]) -> Optional[Dict[str, Any]]:
         if not variables:
-            # Check if this binding actually enables the transition
             if self._check_enabled_with_binding(t, marking, context, partial_binding):
                 return partial_binding
             return None
-
+            
         var = variables[0]
-        for i, tok in enumerate(token_pool):
-            if i in used_indices:
-                continue
-            # Try assigning tok.value to var
-            new_binding = dict(partial_binding)
-            new_binding[var] = tok.value
-            used_indices.add(i)
-            res = self._backtrack_binding(variables[1:], token_pool, context, t, marking, new_binding, used_indices)
-            if res is not None:
-                return res
-            used_indices.remove(i)
+        sources = var_sources.get(var)
+        
+        if not sources:
+            # Variable not found in any input arc (maybe only in guard/output? but needs binding)
+            # Cannot proceed.
+            return None
+            
+        # For now, assume a variable appears in exactly one input arc for binding purposes 
+        # (or if multiple, they must match, which is complex).
+        # Let's take the first source for generating candidates.
+        source = sources[0]
+        place_name = source['place']
+        count = source['count']
+        is_multiset = source['is_multiset']
+        
+        place_tokens = marking.get_multiset(place_name).tokens
+        valid_tokens = [(i, tok) for i, tok in enumerate(place_tokens) 
+                        if tok.timestamp <= marking.global_clock and i not in used_tokens_map.get(place_name, set())]
+        
+        # If multiset binding (binding to a list of values)
+        if is_multiset:
+            # We need to pick 'count' tokens from valid_tokens
+            import itertools
+            # combinations returns tuples of (index, token)
+            for combo in itertools.combinations(valid_tokens, count):
+                indices = {x[0] for x in combo}
+                values = [x[1].value for x in combo]
+                
+                new_binding = dict(partial_binding)
+                new_binding[var] = values # Bind to LIST of values
+                
+                # Update used tokens
+                new_used = {k: v.copy() for k, v in used_tokens_map.items()}
+                if place_name not in new_used: new_used[place_name] = set()
+                new_used[place_name].update(indices)
+                
+                res = self._backtrack_binding_v2(variables[1:], var_sources, marking, context, t, new_binding, new_used)
+                if res: return res
+        else:
+            # Single value binding
+            # We need to pick ONE value 'v' such that there are 'count' occurrences of it?
+            # Or does the parser count imply we need to consume 'count' tokens of that value?
+            # Standard CPN: "3`x" -> x is single value, consume 3 tokens of value x.
+            # BUT user requirement: "N`var - Binds N tokens to var (where var becomes a list)".
+            # AND "var" or "[var]" -> single token.
+            
+            # Implementation for count=1 (standard)
+            # Try each available token
+            seen_values = set()
+            seen_unhashable = []
+            for idx, tok in valid_tokens:
+                val = tok.value
+                is_hashable = False
+                try:
+                    hash(val)
+                    is_hashable = True
+                except TypeError:
+                    pass
+
+                if is_hashable:
+                    if val in seen_values:
+                        continue
+                    seen_values.add(val)
+                else:
+                    if val in seen_unhashable:
+                        continue
+                    seen_unhashable.append(val)
+                
+                new_binding = dict(partial_binding)
+                new_binding[var] = val
+                
+                new_used = {k: v.copy() for k, v in used_tokens_map.items()}
+                if place_name not in new_used: new_used[place_name] = set()
+                new_used[place_name].add(idx)
+                
+                res = self._backtrack_binding_v2(variables[1:], var_sources, marking, context, t, new_binding, new_used)
+                if res: return res
+                
         return None
 
     def _find_all_bindings(self, t: Transition, marking: Marking, context: EvaluationContext) -> List[Dict[str, Any]]:
-        variables = t.variables
+        from cpnpy.cpn.parser import InputArcParser
+        parser = InputArcParser()
+        var_sources = defaultdict(list)
         input_arcs = self.get_input_arcs(t)
-
-        # Gather candidate tokens from input places that are ready
-        token_pool = []
         for arc in input_arcs:
-            place_tokens = marking.get_multiset(arc.source.name).tokens
-            candidate_tokens = [tok for tok in place_tokens if tok.timestamp <= marking.global_clock]
-            token_pool.extend(candidate_tokens)
+            parsed = parser.parse(arc.expression)
+            var_sources[parsed.variable].append({
+                'place': arc.source.name, 
+                'count': parsed.count, 
+                'is_multiset': parsed.is_multiset
+            })
 
         solutions = []
-        self._backtrack_all_bindings(variables, token_pool, context, t, marking, {}, set(), solutions)
+        self._backtrack_all_bindings(t.variables, var_sources, marking, context, t, {}, {}, solutions)
         return solutions
 
-    def _backtrack_all_bindings(self, variables: List[str], token_pool: List[Token], context: EvaluationContext,
-                                t: Transition, marking: Marking, partial_binding: Dict[str, Any],
-                                used_indices: set, solutions: List[Dict[str, Any]]):
+    def _backtrack_all_bindings(self, variables: List[str], var_sources: Dict[str, List[dict]],
+                                marking: Marking, context: EvaluationContext, t: Transition,
+                                partial_binding: Dict[str, Any], used_tokens_map: Dict[str, Set[int]],
+                                solutions: List[Dict[str, Any]]):
         if not variables:
-            # Check if this binding actually enables the transition
             if self._check_enabled_with_binding(t, marking, context, partial_binding):
                 solutions.append(dict(partial_binding))
             return
 
         var = variables[0]
-        for i, tok in enumerate(token_pool):
-            if i in used_indices:
-                continue
-            new_binding = dict(partial_binding)
-            new_binding[var] = tok.value
-            used_indices.add(i)
-            self._backtrack_all_bindings(variables[1:], token_pool, context, t, marking, new_binding, used_indices,
-                                         solutions)
-            used_indices.remove(i)
+        sources = var_sources.get(var)
+        if not sources: return 
+        
+        source = sources[0]
+        place_name = source['place']
+        count = source['count']
+        is_multiset = source['is_multiset']
+        
+        place_tokens = marking.get_multiset(place_name).tokens
+        valid_tokens = [(i, tok) for i, tok in enumerate(place_tokens) 
+                        if tok.timestamp <= marking.global_clock and i not in used_tokens_map.get(place_name, set())]
+
+        if is_multiset:
+            import itertools
+            for combo in itertools.combinations(valid_tokens, count):
+                indices = {x[0] for x in combo}
+                values = [x[1].value for x in combo]
+                
+                new_binding = dict(partial_binding)
+                new_binding[var] = values
+                
+                new_used = {k: v.copy() for k, v in used_tokens_map.items()}
+                if place_name not in new_used: new_used[place_name] = set()
+                new_used[place_name].update(indices)
+                
+                self._backtrack_all_bindings(variables[1:], var_sources, marking, context, t, new_binding, new_used, solutions)
+        else:
+            # Single value binding
+            seen_values = set()
+            seen_unhashable = []
+            for idx, tok in valid_tokens:
+                val = tok.value
+                is_hashable = False
+                try:
+                    hash(val)
+                    is_hashable = True
+                except TypeError:
+                    pass
+
+                if is_hashable:
+                    if val in seen_values:
+                        continue
+                    seen_values.add(val)
+                else:
+                    if val in seen_unhashable:
+                        continue
+                    seen_unhashable.append(val)
+                
+                new_binding = dict(partial_binding)
+                new_binding[var] = val
+                
+                new_used = {k: v.copy() for k, v in used_tokens_map.items()}
+                if place_name not in new_used: new_used[place_name] = set()
+                new_used[place_name].add(idx)
+                
+                self._backtrack_all_bindings(variables[1:], var_sources, marking, context, t, new_binding, new_used, solutions)
 
     def advance_global_clock(self, marking: Marking):
         future_ts = []

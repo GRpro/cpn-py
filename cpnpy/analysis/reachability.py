@@ -26,6 +26,8 @@ def equiv_marking_to_key(marking: Marking) -> Tuple[int, Tuple[Tuple[str, Tuple[
     """
     place_entries = []
     for place_name, ms in sorted(marking._marking.items(), key=lambda x: x[0]):
+        if not ms.tokens:
+            continue
         # Convert tokens to a sorted tuple of (value, timestamp), ensuring both are hashable
         token_list = tuple(
             sorted((make_hashable(t.value), make_hashable(t.timestamp)) for t in ms.tokens)
@@ -54,6 +56,27 @@ def copy_marking(original: Marking) -> Marking:
     return new_marking
 
 
+def _enabled_bindings(cpn: CPN, marking: Marking, context: EvaluationContext):
+    """All (transition, binding) pairs enabled at the marking's global clock."""
+    enabled = []
+    for t in cpn.transitions:
+        for binding in cpn._find_all_bindings(t, marking, context):
+            enabled.append((t, binding))
+    return enabled
+
+
+def _best_priority_bindings(enabled_transitions):
+    """Keep bindings of the highest-priority enabled transitions (lowest numeric value)."""
+    if not enabled_transitions:
+        return enabled_transitions
+    best_pri = min(getattr(t, "priority", 0) for t, _ in enabled_transitions)
+    return [
+        (t, binding)
+        for t, binding in enabled_transitions
+        if getattr(t, "priority", 0) == best_pri
+    ]
+
+
 def build_reachability_graph(
         cpn: CPN,
         initial_marking: Marking,
@@ -63,6 +86,10 @@ def build_reachability_graph(
 ) -> nx.DiGraph:
     """
     Build the reachability graph of the given CPN starting from initial_marking.
+
+    Exploration matches simulation: only best-priority enabled transitions fire.
+    When none are enabled, the global clock advances and search continues until
+    time cannot advance (deadlock). Same-priority ties are fully interleaved.
     """
     RG = nx.DiGraph()
     visited: Set[Any] = set()
@@ -77,27 +104,18 @@ def build_reachability_graph(
         current_key = queue.popleft()
         current_marking = RG.nodes[current_key]['marking']
 
-        # Find all enabled transitions and their bindings
-        enabled_transitions = []
-        for t in cpn.transitions:
-            bindings = cpn._find_all_bindings(t, current_marking, context)
-            for b in bindings:
-                enabled_transitions.append((t, b))
+        enabled_transitions = _enabled_bindings(cpn, current_marking, context)
 
         # If no transitions are enabled, attempt to advance the global clock
         if not enabled_transitions:
             old_clock = current_marking.global_clock
             cpn.advance_global_clock(current_marking)
             if current_marking.global_clock > old_clock:
-                # Check if transitions are now enabled
-                new_enabled_transitions = []
-                for t in cpn.transitions:
-                    bindings = cpn._find_all_bindings(t, current_marking, context)
-                    for b in bindings:
-                        new_enabled_transitions.append((t, b))
-                enabled_transitions = new_enabled_transitions
+                enabled_transitions = _enabled_bindings(cpn, current_marking, context)
 
-        # For each enabled transition and binding, generate successor marking
+        enabled_transitions = _best_priority_bindings(enabled_transitions)
+
+        # For each best-priority transition and binding, generate successor marking
         for (trans, binding) in enabled_transitions:
             successor_marking = copy_marking(current_marking)
             # Fire transition
