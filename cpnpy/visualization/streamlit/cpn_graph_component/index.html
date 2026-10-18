@@ -12,7 +12,7 @@
                     width: 100%;
                     min-height: 400px;
                     border: 1px solid #ddd;
-                    background: #fafafa;
+                    background: #fafafa; /* overridden by graphData.background when set */
                 }
                 #graph-status {
                     position: absolute;
@@ -169,7 +169,7 @@
                 }
 
                 function applyPositionMap(nodes, posMap) {
-                    if (!posMap) return false;
+                    if (!posMap || !nodes) return false;
                     let any = false;
                     nodes.forEach(n => {
                         if (posMap[n.id]) {
@@ -595,6 +595,10 @@
                 const container = document.getElementById('mynetwork');
                 const labelsContainer = document.getElementById('labels-container');
                 const statusEl = document.getElementById('graph-status');
+                const canvasBg = graphData.background || '#fafafa';
+                document.body.style.background = canvasBg;
+                if (graphHost) graphHost.style.background = canvasBg;
+                container.style.background = canvasBg;
                 container.innerHTML = '';
                 labelsContainer.innerHTML = '';
                 renderNotifications(graphData.notifications);
@@ -637,22 +641,61 @@
                     statusEl.style.display = 'none';
                 }
 
+                function coreGraph(nodes, edges) {
+                    const core = (nodes || []).filter(n => !n.hanging);
+                    const ids = new Set(core.map(n => n.id));
+                    const coreEdges = (edges || []).filter(
+                        e => ids.has(e.from) && ids.has(e.to),
+                    );
+                    return { nodes: core, edges: coreEdges };
+                }
+
                 function applyLayoutStrategy(nodes, edges, strategy, spread, cfg) {
+                    const core = coreGraph(nodes, edges);
                     if (strategy === 'flow_lr') {
-                        assignFlowLRPositions(nodes, edges, spread, cfg);
+                        assignFlowLRPositions(core.nodes, core.edges, spread, cfg);
                     } else if (strategy === 'cluster') {
-                        assignClusterPositions(nodes, edges, spread, cfg);
+                        assignClusterPositions(core.nodes, core.edges, spread, cfg);
                     } else if (strategy === 'layered_lr') {
-                        assignLayeredLRPositions(nodes, edges, spread, cfg);
+                        assignLayeredLRPositions(core.nodes, core.edges, spread, cfg);
                     } else {
-                        assignInitialPositions(nodes, spread);
+                        assignInitialPositions(core.nodes, spread);
                     }
                 }
 
                 function nodesMissingPositions(nodes) {
                     return (nodes || []).some(
-                        n => typeof n.x !== 'number' || typeof n.y !== 'number',
+                        n => !n.hanging && (typeof n.x !== 'number' || typeof n.y !== 'number'),
                     );
+                }
+
+                function placeHangingTips(nodes) {
+                    const byId = {};
+                    (nodes || []).forEach(n => { byId[n.id] = n; });
+                    (nodes || []).forEach(n => {
+                        if (!n.hanging) return;
+                        if (typeof n.x === 'number' && typeof n.y === 'number') return;
+                        const h = n.hanging;
+                        const len = typeof h.len === 'number' ? h.len : 42;
+                        const anchor = byId[h.anchor];
+                        if (!anchor || typeof anchor.x !== 'number' || typeof anchor.y !== 'number') {
+                            return;
+                        }
+                        let tx = anchor.x;
+                        let ty = anchor.y;
+                        if (h.place && byId[h.place]) {
+                            const p = byId[h.place];
+                            if (typeof p.x === 'number' && typeof p.y === 'number') {
+                                tx = p.x;
+                                ty = p.y;
+                            }
+                        }
+                        const dx = tx - anchor.x;
+                        const dy = ty - anchor.y;
+                        const dist = Math.hypot(dx, dy) || 1;
+                        n.x = anchor.x + (dx / dist) * len;
+                        n.y = anchor.y + (dy / dist) * len;
+                    });
                 }
 
                 function knownPositionMap(nodes) {
@@ -698,6 +741,7 @@
                     );
                     applyPositionMap(graphData.nodes, known);
                 }
+                placeHangingTips(graphData.nodes);
 
                 const usePhysics = !loadedFromSave && layoutStrategy === 'force';
                 const layoutFitAfterDraw = !loadedFromSave && layoutStrategy !== 'force';
@@ -835,6 +879,23 @@
                 const edgesDS = new vis.DataSet(graphData.edges);
                 const network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, options);
 
+                function placeMissingHangingTips() {
+                    const pos = network.getPositions();
+                    graphData.nodes.forEach(n => {
+                        if (pos[n.id]) {
+                            n.x = pos[n.id].x;
+                            n.y = pos[n.id].y;
+                        }
+                    });
+                    placeHangingTips(graphData.nodes);
+                    const updates = graphData.nodes.filter(n => n.hanging).map(n => ({
+                        id: n.id,
+                        x: n.x,
+                        y: n.y,
+                    }));
+                    if (updates.length) nodesDS.update(updates);
+                }
+
                 network.on("dragEnd", () => {
                     saveState();
                     syncLayoutToStreamlit();
@@ -858,6 +919,7 @@
                 });
                 if (usePhysics) {
                     network.once("stabilized", () => {
+                        placeMissingHangingTips();
                         pushLayoutToSessionIfRequested();
                     });
                 }
@@ -883,6 +945,7 @@
                     const tr = document.createElement('div');
                     tr.className = 'corner-label colorset-label graph-scaled-label';
                     tr.innerText = node.corner_tr || '';
+                    if (node.font && node.font.color) tr.style.color = node.font.color;
                     labelsContainer.appendChild(tr);
                     const br = document.createElement('div');
                     br.className = 'corner-label token-label';
@@ -1149,6 +1212,10 @@
                     if (params.nodes.length > 0) {
                         const nodeId = params.nodes[0];
                         const node = graphData.nodes.find(n => n.id === nodeId);
+                        if (node && node.type === 'hang_tip') {
+                            hideOverlay();
+                            return;
+                        }
                         localStorage.setItem(SEL_KEY, nodeId);
                         if (node) {
                             syncStepModeTransitionPick(nodeId, node);
@@ -1168,7 +1235,7 @@
                     const lastSel = localStorage.getItem(SEL_KEY);
                     if (lastSel) {
                         const node = graphData.nodes.find(n => n.id === lastSel);
-                        if (node) showOverlay(node);
+                        if (node && node.type !== 'hang_tip') showOverlay(node);
                     }
                 }
 
@@ -1190,6 +1257,10 @@
                 }
 
                 function showOverlay(node) {
+                    if (!node || node.type === 'hang_tip') {
+                        hideOverlay();
+                        return;
+                    }
                     const overlay = document.getElementById('overlay');
                     const title   = document.getElementById('overlay-title');
                     const content = document.getElementById('overlay-content');
@@ -1221,13 +1292,13 @@
                         title.innerHTML = '<b>' + node.id + '</b>: <i style="font-weight:normal">' + esc(node.colorset_name) + '</i>';
                         let summary = node.is_timed ? '<b><span style="color:#27ae60">' + (node.token_avail || 0) + '@</span>, ' + (node.token_future || 0) + '@ tokens</b>' : '<b><span style="color:#27ae60">' + (node.token_avail || 0) + '</span> tokens</b>';
                         let html = '<div style="margin-top:10px">' + summary + '</div><div style="margin-top:10px">';
-                        node.full_tokens.forEach(t => {
+                        (node.full_tokens || []).forEach(t => {
                             const color = t.is_avail ? '#27ae60' : 'black';
                             // Timed places always show @ts (including @0); untimed omit.
                             const ts = node.is_timed ? ' @' + t.timestamp : '';
                             html += `<div class="token-row" style="color:${color}">${esc(t.value)}${ts}</div>`;
             });
-                        if (!node.full_tokens.length) html += '<i>No tokens</i>';
+                        if (!(node.full_tokens || []).length) html += '<i>No tokens</i>';
                         html += '</div>';
                         content.innerHTML = html;
         }
