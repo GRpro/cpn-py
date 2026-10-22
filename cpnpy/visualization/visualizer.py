@@ -173,8 +173,6 @@ class CPNGraphViz:
             raise RuntimeError("Graph not created. Call apply() first.")
         self.graph.view()
 
-    from pyvis.network import Network
-
     def view_interactive(self):
 
         import pydot

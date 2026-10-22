@@ -296,6 +296,17 @@ def test_normalize_animation_arcs_small_and_large():
     assert large[0]["badge_count"] == 20
 
 
+def test_normalize_animation_arcs_skips_zero_and_keeps_missing_count():
+    arcs = normalize_animation_arcs([
+        {"arc": "a|b", "count": 0},
+        {"arc": "b|c"},
+        {"arc": "c|d", "count": 2},
+    ])
+    assert [item["arc"] for item in arcs] == ["b|c", "c|d"]
+    assert arcs[0]["count"] == 1
+    assert arcs[1]["count"] == 2
+
+
 def test_animation_wait_ms_many_tokens_uses_badge_timing():
     timings = compute_animation_timings(425)
     firing = {"in": [{"arc": "P|T", "count": 100}], "out": []}

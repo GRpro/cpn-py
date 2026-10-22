@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
-from cpnpy.cpn.cpn_imp import CPN, EvaluationContext, Marking, format_exception_oneline
+
+from cpnpy.cpn.cpn_imp import CPN, EvaluationContext, Marking, Transition, format_exception_oneline
 from cpnpy.simulation.simu import get_enabled_transitions
 from cpnpy.visualization.streamlit.helpers import (
     MonitorSpec,
@@ -34,6 +36,17 @@ class StepResult:
     error: str | None = None
 
 
+def choose_enabled_transition(enabled: list[Transition]) -> str | None:
+    """Pick one transition uniformly from those allowed to fire now.
+
+    ``get_enabled_transitions`` already keeps only the best priority. Taking
+    the first of that list starves the others in an untimed loop.
+    """
+    if not enabled:
+        return None
+    return random.choice(enabled).name
+
+
 def advance_clock(cpn: CPN, marking: Marking) -> bool:
     """Advance global clock once. Returns True if the clock moved."""
     before = marking.global_clock
@@ -56,6 +69,8 @@ def fire_transition(
 
     Returns kind in {"fired", "monitor", "error"}.
     """
+    info: dict = {"in": [], "out": []}
+    fired = False
     try:
         trans = cpn.get_transition_by_name(transition_name)
         if trans is None:
@@ -83,6 +98,7 @@ def fire_transition(
                 monitors=before_hit,
             )
         info = cpn.fire_transition(trans, marking, context)
+        fired = True
         info["transition"] = transition_name
         after_hit: list[str] = []
         if not skip_monitors:
@@ -106,11 +122,19 @@ def fire_transition(
             )
         return StepResult(kind="fired", firings=1, info=info)
     except Exception as exc:
+        if fired:
+            info = dict(info)
+            info.setdefault("transition", transition_name)
+        message = format_exception_oneline(exc)
+        # The enabled scan can go stale before this fire. That is not a
+        # committed failure; the macro-step retries from a fresh scan.
+        if not fired and message.startswith("RuntimeError: No valid binding found"):
+            return StepResult(kind="idle", firings=0)
         return StepResult(
             kind="error",
-            firings=0,
-            info={"in": [], "out": []},
-            error=format_exception_oneline(exc),
+            firings=1 if fired else 0,
+            info=info if fired else {"in": [], "out": []},
+            error=message,
         )
 
 
@@ -125,6 +149,7 @@ def run_batch_macro_step(
     batch_firings: int,
     stop_requested: bool,
     skip_monitors: bool = False,
+    _binding_retry: bool = True,
 ) -> StepResult:
     """
     One batch macro-step: decide via batch_step_logic, then fire/advance/monitors.
@@ -135,7 +160,7 @@ def run_batch_macro_step(
     """
     auto = True if config.mode == "time" else config.auto_advance
     enabled = get_enabled_transitions(cpn, marking, context)
-    enabled_name = enabled[0].name if enabled else None
+    enabled_name = choose_enabled_transition(enabled)
 
     decision = batch_step_logic(
         batch_mode=config.mode,
@@ -158,10 +183,32 @@ def run_batch_macro_step(
             enabled_slugs=enabled_slugs,
             skip_monitors=skip_monitors,
         )
-        if fire_result.kind == "error":
+        if fire_result.kind == "idle":
+            if _binding_retry:
+                return run_batch_macro_step(
+                    cpn=cpn,
+                    marking=marking,
+                    context=context,
+                    monitors=monitors,
+                    enabled_slugs=enabled_slugs,
+                    config=config,
+                    batch_firings=batch_firings,
+                    stop_requested=stop_requested,
+                    skip_monitors=skip_monitors,
+                    _binding_retry=False,
+                )
             return StepResult(
                 kind="error",
                 firings=batch_firings,
+                error=(
+                    "RuntimeError: No valid binding found for transition "
+                    f"{enabled_name}."
+                ),
+            )
+        if fire_result.kind == "error":
+            return StepResult(
+                kind="error",
+                firings=batch_firings + int(fire_result.firings or 0),
                 info=fire_result.info,
                 error=fire_result.error,
             )

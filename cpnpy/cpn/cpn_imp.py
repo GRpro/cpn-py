@@ -1,4 +1,5 @@
 import copy
+import itertools
 import types
 from collections import Counter
 from dataclasses import dataclass, field
@@ -281,21 +282,12 @@ class EvaluationContext:
         return expr_part, delay
 
     def evaluate_input_arc(self, arc_expr: str, binding: Dict[str, Any]) -> (List[Any], int):
-        expr_part = arc_expr
-        delay = 0
-
-        from cpnpy.cpn.parser import InputArcParser
         parser = InputArcParser()
-        
-        parsed = parser.parse(expr_part)
-
+        parsed = parser.parse(arc_expr)
         val = binding[parsed.variable]
-
         if parsed.is_multiset:
-            return val, delay
-        else:
-            return [val], delay
-
+            return val, 0
+        return [val], 0
 
     def evaluate_output_arc(self, arc_expr: str, binding: Dict[str, Any], 
                             target_cs: Optional[ColorSet] = None) -> (List[Any], int):
@@ -653,8 +645,6 @@ class CPN:
         
         # If multiset binding (binding to a list of values)
         if is_multiset:
-            # We need to pick 'count' tokens from valid_tokens
-            import itertools
             # combinations returns tuples of (index, token)
             for combo in itertools.combinations(valid_tokens, count):
                 indices = {x[0] for x in combo}
@@ -713,7 +703,6 @@ class CPN:
         return None
 
     def _find_all_bindings(self, t: Transition, marking: Marking, context: EvaluationContext) -> List[Dict[str, Any]]:
-        from cpnpy.cpn.parser import InputArcParser
         parser = InputArcParser()
         var_sources = defaultdict(list)
         input_arcs = self.get_input_arcs(t)
@@ -752,7 +741,6 @@ class CPN:
                         if tok.timestamp <= marking.global_clock and i not in used_tokens_map.get(place_name, set())]
 
         if is_multiset:
-            import itertools
             for combo in itertools.combinations(valid_tokens, count):
                 indices = {x[0] for x in combo}
                 values = [x[1].value for x in combo]

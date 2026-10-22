@@ -1,5 +1,5 @@
 import networkx as nx
-from typing import Tuple, Set, Callable, Any, Dict
+from typing import Tuple, Set, Callable, Any, Dict, Optional
 from collections import deque
 from cpnpy.cpn.cpn_imp import *
 
@@ -82,7 +82,8 @@ def build_reachability_graph(
         initial_marking: Marking,
         context: EvaluationContext,
         marking_equiv_func: Callable[[Marking], Any] = equiv_marking_to_key,
-        binding_equiv_func: Callable[[Dict[str, Any]], Any] = equiv_binding
+        binding_equiv_func: Callable[[Dict[str, Any]], Any] = equiv_binding,
+        max_clock: Optional[int] = None,
 ) -> nx.DiGraph:
     """
     Build the reachability graph of the given CPN starting from initial_marking.
@@ -90,6 +91,9 @@ def build_reachability_graph(
     Exploration matches simulation: only best-priority enabled transitions fire.
     When none are enabled, the global clock advances and search continues until
     time cannot advance (deadlock). Same-priority ties are fully interleaved.
+
+    ``max_clock`` includes every firing at that clock and stops before a jump
+    past it. ``None`` explores until deadlock, which a timed cycle never reaches.
     """
     RG = nx.DiGraph()
     visited: Set[Any] = set()
@@ -103,6 +107,8 @@ def build_reachability_graph(
     while queue:
         current_key = queue.popleft()
         current_marking = RG.nodes[current_key]['marking']
+        if max_clock is not None and current_marking.global_clock > max_clock:
+            continue
 
         enabled_transitions = _enabled_bindings(cpn, current_marking, context)
 
@@ -110,7 +116,9 @@ def build_reachability_graph(
         if not enabled_transitions:
             old_clock = current_marking.global_clock
             cpn.advance_global_clock(current_marking)
-            if current_marking.global_clock > old_clock:
+            if max_clock is not None and current_marking.global_clock > max_clock:
+                current_marking.global_clock = old_clock
+            elif current_marking.global_clock > old_clock:
                 enabled_transitions = _enabled_bindings(cpn, current_marking, context)
 
         enabled_transitions = _best_priority_bindings(enabled_transitions)

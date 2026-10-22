@@ -24,6 +24,10 @@ from cpnpy.visualization.streamlit.helpers import (
 
 
 DEFAULT_LEASE_S = 15.0
+# The worker holds the marking for the whole fast batch. The page cannot read
+# it. A copy is published with the clock, at most this often, so the drawing
+# and the clock stay on the same moment.
+SNAPSHOT_INTERVAL_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,9 @@ class SimulationRuntime:
         self._async_running = False
         self._firings = 0
         self._published_clock = marking.global_clock
+        self._published_firings = 0
+        self._published_marking: Marking | None = None
+        self._snapshot_monotonic = 0.0
         self._batch_mode = "steps"
         self._terminal_reason: str | None = None
         self._monitor_names: tuple[str, ...] = ()
@@ -152,11 +159,15 @@ class SimulationRuntime:
         with self._status_lock:
             if renew and self._async_running and self._lease_deadline is not None:
                 self._lease_deadline = time.monotonic() + self._lease_s
+            if self._async_running and self._published_marking is not None:
+                firings = self._published_firings
+            else:
+                firings = self._firings
             return RuntimeStatus(
                 phase=self._phase,
                 status=self._status_text,
                 global_clock=self._published_clock,
-                firings=self._firings,
+                firings=firings,
                 stop_requested=self._stop.is_set(),
                 lease_deadline=self._lease_deadline,
                 terminal_reason=self._terminal_reason,
@@ -164,6 +175,11 @@ class SimulationRuntime:
                 error=self._error,
                 async_running=self._async_running,
             )
+
+    def published_marking(self) -> Marking | None:
+        """Marking copy last published for the fast-batch drawing. Do not mutate it."""
+        with self._status_lock:
+            return self._published_marking
 
     def renew_lease(self, lease_s: float | None = None) -> None:
         with self._status_lock:
@@ -241,12 +257,35 @@ class SimulationRuntime:
             skip_monitors=skip,
         )
         self._firings = result.firings
-        with self._status_lock:
-            self._published_clock = self._marking.global_clock
-            self._status_text = (
-                f"Running · {self._firings} firings · clock {self._published_clock}"
-            )
+        if self._async_running:
+            self._note_progress()
+        else:
+            with self._status_lock:
+                self._published_clock = self._marking.global_clock
+                self._status_text = (
+                    f"Running · {self._firings} firings · clock {self._published_clock}"
+                )
         return result
+
+    def _note_progress(self, *, force: bool = False) -> None:
+        """Copy the marking and the clock together. Caller owns the marking."""
+        now = time.monotonic()
+        with self._status_lock:
+            if (
+                not force
+                and self._published_marking is not None
+                and now - self._snapshot_monotonic < SNAPSHOT_INTERVAL_S
+            ):
+                return
+        snap = copy.deepcopy(self._marking)
+        with self._status_lock:
+            self._published_marking = snap
+            self._snapshot_monotonic = now
+            self._published_clock = snap.global_clock
+            self._published_firings = self._firings
+            self._status_text = (
+                f"Running · {self._published_firings} firings · clock {self._published_clock}"
+            )
 
     def reset_marking(self, marking: Marking | None = None) -> None:
         with self._gate:
@@ -263,6 +302,9 @@ class SimulationRuntime:
             if marking is not None:
                 self._initial_marking = copy.deepcopy(marking)
             self._firings = 0
+            self._published_firings = 0
+            self._published_marking = None
+            self._snapshot_monotonic = 0.0
             self._published_clock = self._marking.global_clock
             self._terminal_reason = None
             self._monitor_names = ()
@@ -323,6 +365,7 @@ class SimulationRuntime:
             self._terminal_reason = None
             self._monitor_names = ()
             self._error = None
+            self._note_progress(force=True)
 
         def worker() -> None:
             with self._gate:
@@ -386,13 +429,15 @@ class SimulationRuntime:
             monitors=monitors,
             error=error,
         )
+        self._firings = result.firings
+        self._note_progress(force=True)
         with self._status_lock:
             self._terminal_reason = reason
             self._monitor_names = monitors
             self._error = error
             self._status_text = msg
             self._phase = "terminal"
-            self._firings = result.firings
+            self._published_firings = result.firings
             self._published_clock = self._marking.global_clock
 
     def _async_worker_loop(self, config: BatchConfig, *, max_iterations: int) -> None:

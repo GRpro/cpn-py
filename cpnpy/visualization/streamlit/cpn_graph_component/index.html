@@ -593,6 +593,9 @@
                 const TOKEN_STAGGER = anim.stagger_ms || 20;
                 const graphHost = document.getElementById('graph-host');
                 const container = document.getElementById('mynetwork');
+                if (graphHost) {
+                    graphHost.querySelectorAll(':scope > canvas').forEach((node) => node.remove());
+                }
                 const labelsContainer = document.getElementById('labels-container');
                 const statusEl = document.getElementById('graph-status');
                 const canvasBg = graphData.background || '#fafafa';
@@ -908,6 +911,9 @@
                 network.on("dragging", updateCornerLabels);
                 network.once("afterDrawing", () => {
                     hideGraphStatus();
+                    if (layoutFitAfterDraw) {
+                        network.fit({ animation: false, padding: 50 });
+                    }
                     if (graphData.prefer_saved_layout && loadedFromSave) {
                         saveState();
                     } else if (!loadedFromSave && !localStorage.getItem(STORAGE_KEY)) {
@@ -921,11 +927,6 @@
                     network.once("stabilized", () => {
                         placeMissingHangingTips();
                         pushLayoutToSessionIfRequested();
-                    });
-                }
-                if (layoutFitAfterDraw) {
-                    network.once("afterDrawing", () => {
-                        network.fit({ animation: false, padding: 50 });
                     });
                 }
 
@@ -1317,12 +1318,16 @@
                     return d.innerHTML;
                 }
                 }
+                let lastGraphPayload = null;
                 window.addEventListener("message", function (event) {
                     if (!event.data || event.data.type !== "streamlit:render") return;
                     const args = event.data.args || {};
                     const frameHeight = args.height || 800;
+                    const signature = String(frameHeight) + "\n" + (args.graph_data_json || "");
+                    if (signature === lastGraphPayload) return;
                     try {
                         runGraph(JSON.parse(args.graph_data_json), frameHeight);
+                        lastGraphPayload = signature;
                     } catch (err) {
                         const container = document.getElementById('mynetwork');
                         showGraphError(container, 'Graph render failed: ' + (err && err.message ? err.message : err));

@@ -19,7 +19,6 @@ DEFAULT_PHASE_GAP_RATIO = 25 / 425
 DEFAULT_STAGGER_RATIO = 0.1
 ANIMATION_START_BUFFER_MS = 75
 MAX_ADVANCES_PER_RUN = 50
-FAST_BATCH_ADVANCES_PER_RUN = 5
 ASYNC_BATCH_POLL_MS = 3000
 STOP_POLL_MS = 50
 MAX_ANIMATED_TOKENS = 5
@@ -375,8 +374,6 @@ def _dotted_name_lines(name: str) -> list[str]:
 def format_place_graph_label(place_name: str) -> str:
     """HTML label for vis-network place ellipse (bold; \\n between lines)."""
     lines = _dotted_name_lines(place_name)
-    if not lines:
-        return f"<b>{place_name}</b>"
     # vis-network html multi-font only supports <b>/<i>/<code>; newlines use \\n.
     return "\n".join(f"<b>{line}</b>" for line in lines)
 
@@ -384,10 +381,7 @@ def format_place_graph_label(place_name: str) -> str:
 def format_transition_graph_label(trans_name: str, *, has_action: bool) -> str:
     """HTML label for transition box: dotted name lines, optional action line."""
     lines = _dotted_name_lines(trans_name)
-    if not lines:
-        name_part = f"<b>{trans_name}</b>"
-    else:
-        name_part = "\n".join(f"<b>{line}</b>" for line in lines)
+    name_part = "\n".join(f"<b>{line}</b>" for line in lines)
     suffix = "<code>action</code>" if has_action else " "
     return name_part + "\n" + suffix
 
@@ -395,8 +389,6 @@ def format_transition_graph_label(trans_name: str, *, has_action: bool) -> str:
 def estimate_place_ellipse_size(place_name: str) -> tuple[int, int]:
     """Full width/height in px for vis-network ellipse from label text."""
     lines = _dotted_name_lines(place_name)
-    if not lines:
-        lines = [""]
     max_line_len = max(len(line) for line in lines)
     text_w = min(
         PLACE_LABEL_MAX_WIDTH_PX,
@@ -529,7 +521,13 @@ def normalize_animation_arcs(arcs: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     for entry in arcs or []:
         arc = entry.get("arc") or ""
-        count = max(1, int(entry.get("count") or 1))
+        raw_count = entry.get("count")
+        if raw_count is None:
+            count = 1
+        else:
+            count = int(raw_count)
+        if count <= 0:
+            continue
         draw_count = animation_draw_count(count)
         item: dict = {"arc": arc, "count": count, "draw_count": draw_count}
         if count > MAX_ANIMATED_TOKENS:

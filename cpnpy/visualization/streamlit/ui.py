@@ -156,10 +156,11 @@ class CPNStreamlitVisualizer:
         return self.runtime.marking
 
     def _graph_marking(self) -> Marking:
-        """Marking used for graph tokens; frozen while async batch runs."""
-        frozen = st.session_state.get(self._k("graph_freeze_marking"))
-        if frozen is not None and self._async_batch_active():
-            return frozen
+        """Tokens for the graph. During a fast batch this is the worker's latest copy."""
+        if self._async_batch_active():
+            snap = self.runtime.published_marking()
+            if snap is not None:
+                return snap
         return self.runtime.marking
 
     def _async_batch_active(self) -> bool:
@@ -508,9 +509,8 @@ class CPNStreamlitVisualizer:
             st.session_state[self._k("batch_stop_requested")] = False
             st.session_state.pop(self._k("show_sleep_complete"), None)
             st.session_state.pop(self._k("show_frame_painted"), None)
-            # Do not orphan async lease/freeze if repair cleared batch_running.
+            # Do not orphan the async lease if repair cleared batch_running.
             st.session_state.pop(self._k("async_batch_active"), None)
-            st.session_state.pop(self._k("graph_freeze_marking"), None)
 
     def _apply_graph_transition_pick(self, enabled_names: list[str]) -> None:
         """Apply transition chosen on the graph before the selectbox is drawn."""
@@ -1329,7 +1329,6 @@ class CPNStreamlitVisualizer:
         st.session_state[self._k("batch_phase")] = "idle"
         st.session_state[self._k("batch_stop_requested")] = False
         st.session_state.pop(self._k("async_batch_active"), None)
-        st.session_state.pop(self._k("graph_freeze_marking"), None)
         st.session_state.pop(self._k("show_sleep_complete"), None)
         st.session_state.pop(self._k("show_frame_painted"), None)
         st.session_state[self._k("batch_ui_mode")] = mode
@@ -1359,7 +1358,7 @@ class CPNStreamlitVisualizer:
             "batch_running", "batch_stop_requested", "batch_mode", "batch_max_steps",
             "batch_target_time", "batch_animate", "batch_auto_advance", "batch_firings",
             "batch_anim_ms", "batch_phase", "batch_fast_iterations",
-            "async_batch_active", "graph_freeze_marking",
+            "async_batch_active",
         ):
             st.session_state.pop(self._k(suffix), None)
         st.session_state[self._k("batch_phase")] = "idle"
@@ -1380,7 +1379,6 @@ class CPNStreamlitVisualizer:
             copy.deepcopy(st.session_state[f"{self.session_key}_initial"])
         )
         st.session_state[self.session_key] = self.runtime
-        st.session_state.pop(self._k("graph_freeze_marking"), None)
         st.session_state.pop(self._k("async_batch_active"), None)
         st.session_state[self._k("step_count")] = 0
         st.session_state[self._k("anim_ms")] = DEFAULT_TRANSITION_ANIMATION_MS
@@ -1520,14 +1518,10 @@ class CPNStreamlitVisualizer:
 
         if animate:
             st.session_state.pop(self._k("async_batch_active"), None)
-            st.session_state.pop(self._k("graph_freeze_marking"), None)
             st.session_state[self._k("batch_phase")] = "advance"
             st.session_state[self._k("run_drivers_after_sidebar")] = True
         else:
             st.session_state[self._k("batch_phase")] = "fast"
-            st.session_state[self._k("graph_freeze_marking")] = copy.deepcopy(
-                self.runtime.marking,
-            )
             st.session_state[self._k("async_batch_active")] = True
             self._sync_runtime_monitors()
             if st.session_state.pop(self._k("monitors_resume_once"), False):
@@ -1537,7 +1531,6 @@ class CPNStreamlitVisualizer:
             )
             if not submitted:
                 st.session_state.pop(self._k("async_batch_active"), None)
-                st.session_state.pop(self._k("graph_freeze_marking"), None)
                 self._end_batch("Error — runtime busy", rerun=True)
 
     def _run_fast_batch_after_sidebar(self) -> None:
@@ -1567,8 +1560,7 @@ class CPNStreamlitVisualizer:
 
         st.session_state[self._k("batch_status")] = status.status
 
-        # Terminal: drop freeze so graph shows final marking from runtime.
-        st.session_state.pop(self._k("graph_freeze_marking"), None)
+        # Terminal: draw the live marking again. The worker has stopped.
         st.session_state.pop(self._k("async_batch_active"), None)
         if status.terminal_reason == "monitor":
             names = list(status.monitor_names)

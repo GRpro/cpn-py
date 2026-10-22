@@ -135,6 +135,26 @@ def test_reachability_respects_priority():
     assert 101 not in sink_values
 
 
+def test_reachability_max_clock_stops_a_timed_cycle():
+    """A token that returns with a delay never deadlocks. The clock bound does."""
+    cpn = CPN()
+    place = Place("P", IntegerColorSet(timed=True))
+    step = Transition("T", variables=["x"])
+    cpn.add_place(place)
+    cpn.add_transition(step)
+    cpn.add_arc(Arc(place, step, "x"))
+    cpn.add_arc(Arc(step, place, "x @+10"))
+
+    marking = Marking()
+    marking.add_tokens("P", [1], timestamp=0)
+
+    RG = build_reachability_graph(cpn, marking, EvaluationContext(), max_clock=25)
+    assert 0 < len(RG.nodes) <= 6
+    assert RG.number_of_edges() >= 1
+    clocks = [RG.nodes[node]["marking"].global_clock for node in RG.nodes]
+    assert max(clocks) <= 25
+
+
 def test_equiv_marking_to_key():
     """Verify that equivalent markings produce the same key."""
     m1 = Marking()

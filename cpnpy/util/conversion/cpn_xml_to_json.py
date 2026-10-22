@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 import re
-from typing import Dict, Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 
 def parse_color_element(color_elem: ET.Element) -> str:
@@ -91,10 +91,6 @@ def parse_color_element(color_elem: ET.Element) -> str:
             color_type += " timed"
 
     return f"colset {color_name} = {color_type};"
-
-import xml.etree.ElementTree as ET
-import re
-from typing import Dict, Any, List, Optional, Union, Set
 
 
 def cpn_xml_to_json(xml_path: str) -> Dict[str, Any]:
@@ -199,8 +195,6 @@ def cpn_xml_to_json(xml_path: str) -> Dict[str, Any]:
         pageattr = page_elem.find("pageattr")
         page_name = pageattr.get("name", "PAGE") if pageattr is not None else "PAGE"
 
-        print(f"Page element {page_name} found, parsing places (pass 1).")
-
         for place_elem in page_elem.findall("place"):
             pid = place_elem.get("id", "")
 
@@ -240,11 +234,6 @@ def cpn_xml_to_json(xml_path: str) -> Dict[str, Any]:
     # 4. SECOND PASS: initial markings (redirect ports to sockets)
     # ------------------------------------------------------------------
     for page_elem in page_elements:
-        pageattr = page_elem.find("pageattr")
-        page_name = pageattr.get("name", "PAGE") if pageattr is not None else "PAGE"
-
-        print(f"Page element {page_name} found, parsing initial markings (pass 2).")
-
         for place_elem in page_elem.findall("place"):
             pid = place_elem.get("id", "")
 
@@ -399,14 +388,10 @@ def cpn_xml_to_json(xml_path: str) -> Dict[str, Any]:
             if delay_annot is not None and delay_annot.text:
                 delay_text = delay_annot.text.strip()
 
-            # Action code from <code><text>
-            action: List[str] = []
+            action = ""
             code_action_elem = trans_elem.find("./code/text")
             if code_action_elem is not None and code_action_elem.text:
-                raw_action = code_action_elem.text.strip()
-                action.append(raw_action)
-
-            action = "".join(action)
+                action = code_action_elem.text.strip()
 
             # Arc info
             arcs_data = trans_arcs.get(tname, {"inArcs": [], "outArcs": []})

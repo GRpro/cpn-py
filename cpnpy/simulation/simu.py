@@ -58,11 +58,6 @@ def simulate_until_deadlock(
             if not enabled:
                 break
 
-            # Safety check for max_time before firing
-            if max_time is not None and marking.global_clock > max_time:
-                print(f"Global time {marking.global_clock} > max_time={max_time}, stopping.")
-                return marking
-
             # Choose a random transition among those with the best priority
             t = random.choice(enabled)
             step += 1

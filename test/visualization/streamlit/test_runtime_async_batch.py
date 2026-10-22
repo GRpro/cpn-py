@@ -187,3 +187,39 @@ def test_poll_renews_lease():
     status = rt.poll_status(renew=False)
     assert status.terminal_reason == "done"
     assert status.firings == 30
+
+
+def test_async_iteration_cap_keeps_partial_status():
+    from cpnpy.visualization.streamlit.runtime import SimulationRuntime
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig
+
+    cpn, marking, ctx = _chain_net(5)
+    rt = SimulationRuntime(cpn, marking, ctx)
+    assert rt.submit_non_animated_batch(
+        BatchConfig(mode="steps", max_steps=0),
+        max_iterations=1,
+    )
+    status = _wait_terminal(rt)
+    assert status.terminal_reason == "done"
+    assert "iteration cap" in status.status
+    assert status.firings == 1
+    assert len(rt.marking.get_multiset("P2").tokens) == 1
+
+
+def test_async_worker_crash_is_an_error_terminal():
+    from cpnpy.visualization.streamlit.runtime import SimulationRuntime
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig
+
+    cpn, marking, ctx = _chain_net(3)
+    rt = SimulationRuntime(cpn, marking, ctx)
+
+    def boom(_config):
+        raise RuntimeError("worker boom")
+
+    rt._one_macro_step = boom  # type: ignore[method-assign]
+    assert rt.submit_non_animated_batch(BatchConfig(mode="steps", max_steps=3))
+    status = _wait_terminal(rt)
+    assert status.async_running is False
+    assert status.terminal_reason == "error"
+    assert status.error == "RuntimeError: worker boom"
+    assert status.status == "Error — RuntimeError: worker boom"

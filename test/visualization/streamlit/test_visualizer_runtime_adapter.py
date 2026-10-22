@@ -106,20 +106,24 @@ def test_marking_property_is_runtime_marking(st_session):
     assert id(v.marking) == id(marking)
 
 
-def test_graph_marking_frozen_while_async_flag(st_session):
+def test_graph_marking_follows_published_snapshot(st_session):
     session, _fake_st, viz_mod = st_session
     cpn, marking, ctx = _simple_net()
     v = viz_mod.CPNStreamlitVisualizer(
         cpn, marking, context=ctx, session_key="rt_freeze",
     )
-    import copy
-
-    frozen = copy.deepcopy(v.marking)
-    session[v._k("graph_freeze_marking")] = frozen
+    v.runtime._note_progress(force=True)
     session[v._k("async_batch_active")] = True
     v.runtime.fire("T1")
     assert len(v.marking.get_multiset("P1").tokens) == 2
     assert len(v._graph_marking().get_multiset("P1").tokens) == 3
+    assert v.runtime.poll_status(renew=False).global_clock == v._graph_marking().global_clock
+    v.runtime.marking.global_clock = 36090
+    assert v.runtime.poll_status(renew=False).global_clock == 0
+    v.runtime._note_progress(force=True)
+    assert len(v._graph_marking().get_multiset("P1").tokens) == 2
+    assert v.runtime.poll_status(renew=False).global_clock == 36090
+    assert v._graph_marking().global_clock == 36090
 
 
 def test_async_start_stop_poll_terminal(st_session):
@@ -131,7 +135,7 @@ def test_async_start_stop_poll_terminal(st_session):
     v._init_session_defaults()
     v._start_batch("steps", 8, 0, False, True, 500)
     assert session[v._k("async_batch_active")] is True
-    assert session[v._k("graph_freeze_marking")] is not None
+    assert v.runtime.published_marking() is not None
 
     assert v.runtime.wait_until_idle(timeout=2.0)
     # Avoid 3s poll sleep; worker already finished — drain terminal state.
@@ -140,8 +144,8 @@ def test_async_start_stop_poll_terminal(st_session):
 
     assert not session.get(v._k("batch_running"))
     assert not session.get(v._k("async_batch_active"))
-    assert session.get(v._k("graph_freeze_marking")) is None
     assert len(v.runtime.marking.get_multiset("P2").tokens) == 8
+    assert len(v._graph_marking().get_multiset("P2").tokens) == 8
 
 
 def test_async_poll_keeps_batch_status_running_for_repair(st_session):
@@ -163,7 +167,6 @@ def test_async_poll_keeps_batch_status_running_for_repair(st_session):
     session[v._k("batch_phase")] = "fast"
     session[v._k("batch_status")] = "Running"
     session[v._k("async_batch_active")] = True
-    session[v._k("graph_freeze_marking")] = marking
 
     def fake_poll(*, renew=True):
         return RuntimeStatus(

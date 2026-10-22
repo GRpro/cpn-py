@@ -86,6 +86,52 @@ def test_macro_step_fires():
     assert len(marking.get_multiset("P2").tokens) == 1
 
 
+def test_fire_without_ready_token_is_idle_not_an_error():
+    from cpnpy.visualization.streamlit.step_engine import fire_transition
+
+    cpn, marking, ctx = _simple_net(tokens=())
+    result = fire_transition(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        transition_name="T1",
+        monitors=[],
+        enabled_slugs=frozenset(),
+    )
+    assert result.kind == "idle"
+    assert result.firings == 0
+    assert len(marking.get_multiset("P2").tokens) == 0
+
+
+def test_macro_step_retries_when_named_fire_has_no_binding():
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn, marking, ctx = _simple_net(tokens=(1,))
+    calls = {"n": 0}
+    original = cpn.fire_transition
+
+    def flaky(trans, marking, context, binding=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(f"No valid binding found for transition {trans.name}.")
+        return original(trans, marking, context, binding)
+
+    cpn.fire_transition = flaky  # type: ignore[method-assign]
+    result = run_batch_macro_step(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        monitors=[],
+        enabled_slugs=frozenset(),
+        config=BatchConfig(mode="steps", max_steps=10),
+        batch_firings=4,
+        stop_requested=False,
+    )
+    assert result.kind == "fired"
+    assert result.firings == 5
+    assert len(marking.get_multiset("P2").tokens) == 1
+
+
 def test_macro_step_done_at_steps_limit():
     from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
 
@@ -239,6 +285,76 @@ def test_fire_transition_error_unknown():
     assert result.error
 
 
+def _two_loop_net():
+    """One token and two transitions that each put it back. Both stay enabled."""
+    cpn = CPN()
+    place = Place("P", IntegerColorSet())
+    first = Transition("A", variables=["x"])
+    second = Transition("B", variables=["x"])
+    cpn.add_place(place)
+    cpn.add_transition(first)
+    cpn.add_transition(second)
+    cpn.add_arc(Arc(place, first, "x"))
+    cpn.add_arc(Arc(first, place, "x"))
+    cpn.add_arc(Arc(place, second, "x"))
+    cpn.add_arc(Arc(second, place, "x"))
+    marking = Marking()
+    marking.add_tokens("P", [1])
+    return cpn, marking, EvaluationContext()
+
+
+def test_macro_step_can_fire_a_later_enabled_transition(monkeypatch):
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn, marking, ctx = _two_loop_net()
+    monkeypatch.setattr(
+        "cpnpy.visualization.streamlit.step_engine.random.choice",
+        lambda enabled: enabled[-1],
+    )
+    result = run_batch_macro_step(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        monitors=[],
+        enabled_slugs=frozenset(),
+        config=BatchConfig(mode="steps", max_steps=10),
+        batch_firings=0,
+        stop_requested=False,
+    )
+    assert result.kind == "fired"
+    assert result.info.get("transition") == "B"
+    assert len(marking.get_multiset("P").tokens) == 1
+
+
+def test_macro_step_visits_each_enabled_transition(monkeypatch):
+    import random
+
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn, marking, ctx = _two_loop_net()
+    monkeypatch.setattr(
+        "cpnpy.visualization.streamlit.step_engine.random.choice",
+        random.Random(0).choice,
+    )
+    seen: set[str] = set()
+    firings = 0
+    for _ in range(30):
+        result = run_batch_macro_step(
+            cpn=cpn,
+            marking=marking,
+            context=ctx,
+            monitors=[],
+            enabled_slugs=frozenset(),
+            config=BatchConfig(mode="steps", max_steps=100),
+            batch_firings=firings,
+            stop_requested=False,
+        )
+        assert result.kind == "fired"
+        seen.add(result.info["transition"])
+        firings = result.firings
+    assert seen == {"A", "B"}
+
+
 def test_macro_step_before_monitor_respects_priority():
     """Lower-priority enabled transition must not trip its before-monitor."""
     from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
@@ -284,3 +400,61 @@ def test_macro_step_before_monitor_respects_priority():
     assert result.info.get("transition") == "High"
     assert len(marking.get_multiset("P2").tokens) == 1
     assert len(marking.get_multiset("P3").tokens) == 0
+
+
+def _raising_monitor(name: str, *, before: bool) -> MonitorSpec:
+    def predicate(_cpn, _marking):
+        raise RuntimeError(f"{name} failed")
+
+    return MonitorSpec(
+        name=name,
+        slug=slugify_monitor_name(name),
+        predicate=predicate,
+        before=before,
+        transition_name=None,
+        default_enabled=True,
+    )
+
+
+def test_after_monitor_error_keeps_committed_firing():
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn, marking, ctx = _simple_net(tokens=(1,))
+    mon = _raising_monitor("After", before=False)
+    result = run_batch_macro_step(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        monitors=[mon],
+        enabled_slugs=frozenset({mon.slug}),
+        config=BatchConfig(mode="steps", max_steps=10),
+        batch_firings=4,
+        stop_requested=False,
+    )
+    assert result.kind == "error"
+    assert result.firings == 5
+    assert "After failed" in (result.error or "")
+    assert result.info.get("transition") == "T1"
+    assert len(marking.get_multiset("P1").tokens) == 0
+    assert len(marking.get_multiset("P2").tokens) == 1
+
+
+def test_before_monitor_error_does_not_count_a_firing():
+    from cpnpy.visualization.streamlit.step_engine import BatchConfig, run_batch_macro_step
+
+    cpn, marking, ctx = _simple_net(tokens=(1,))
+    mon = _raising_monitor("Before", before=True)
+    result = run_batch_macro_step(
+        cpn=cpn,
+        marking=marking,
+        context=ctx,
+        monitors=[mon],
+        enabled_slugs=frozenset({mon.slug}),
+        config=BatchConfig(mode="steps", max_steps=10),
+        batch_firings=4,
+        stop_requested=False,
+    )
+    assert result.kind == "error"
+    assert result.firings == 4
+    assert "Before failed" in (result.error or "")
+    assert len(marking.get_multiset("P2").tokens) == 0
