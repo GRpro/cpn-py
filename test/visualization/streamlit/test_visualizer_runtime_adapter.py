@@ -338,6 +338,52 @@ def test_layout_sync_empty_to_filled_requests_rerun(st_session, monkeypatch):
     assert session[v._k("graph_layout_positions")]
 
 
+def test_dismiss_status_is_handled_once_per_click(st_session, monkeypatch):
+    import json
+
+    session, _fake_st, viz_mod = st_session
+    cpn, marking, ctx = _simple_net()
+    v = viz_mod.CPNStreamlitVisualizer(
+        cpn, marking, context=ctx, session_key="dismiss_once",
+    )
+    v._init_session_defaults()
+    v._notify(
+        "Monitors triggered: Hit",
+        level="success",
+        dedup_id="monitor_pause",
+    )
+    v._request_rerun = MagicMock()  # type: ignore[method-assign]
+
+    def shown_ids() -> list[str]:
+        return [item["id"] for item in v._graph_notifications()]
+
+    first = json.dumps({"type": "dismiss_status", "id": "monitor_pause", "nonce": 1})
+    monkeypatch.setattr(viz_mod, "cpn_graph", MagicMock(return_value=first))
+    v._render_graph_panel(height=400, enabled_names=[], last_fired={})
+    v._request_rerun.assert_called_once()
+    assert "monitor_pause" not in shown_ids()
+    assert session[v._k("graph_component_value")] == first
+
+    v._request_rerun.reset_mock()
+    v._render_graph_panel(height=400, enabled_names=[], last_fired={})
+    v._request_rerun.assert_not_called()
+    assert "monitor_pause" not in shown_ids()
+
+    v._clear_status_slot("monitor_pause")
+    v._notify(
+        "Monitors triggered: Hit",
+        level="success",
+        dedup_id="monitor_pause",
+    )
+    assert "monitor_pause" in shown_ids()
+    second = json.dumps({"type": "dismiss_status", "id": "monitor_pause", "nonce": 2})
+    monkeypatch.setattr(viz_mod, "cpn_graph", MagicMock(return_value=second))
+    v._request_rerun.reset_mock()
+    v._render_graph_panel(height=400, enabled_names=[], last_fired={})
+    v._request_rerun.assert_called_once()
+    assert "monitor_pause" not in shown_ids()
+
+
 def test_sync_guard_error_status_messages_notify_and_clear(st_session):
     session, _fake_st, viz_mod = st_session
     cpn, marking, ctx = _simple_net()

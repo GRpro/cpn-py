@@ -1,5 +1,7 @@
 # cpnpy
 
+[![Tests](https://github.com/GRpro/cpn-py/actions/workflows/python-tests.yml/badge.svg)](https://github.com/GRpro/cpn-py/actions/workflows/python-tests.yml)
+
 `cpnpy` is a Python-based library designed to simulate Colored Petri Nets (CPNs) with optional time semantics. It provides classes and functions to define places, transitions, arcs, and markings, along with color sets and evaluation contexts to express guards, arc expressions, and timed behavior.
 
 **Key features include:**

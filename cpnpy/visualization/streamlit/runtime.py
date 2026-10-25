@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from cpnpy.cpn.cpn_imp import CPN, EvaluationContext, Marking
+from cpnpy.cpn.cpn_imp import CPN, EvaluationContext, Marking, format_exception_oneline
 from cpnpy.visualization.streamlit.step_engine import (
     BatchConfig,
     StepResult,
@@ -373,8 +373,18 @@ class SimulationRuntime:
                     self._async_worker_loop(
                         config, max_iterations=max_iterations,
                     )
+                except Exception as exc:
+                    with self._status_lock:
+                        if self._terminal_reason is None and not self._error:
+                            self._error = format_exception_oneline(exc)
                 finally:
                     with self._status_lock:
+                        if self._terminal_reason is None:
+                            self._terminal_reason = "error"
+                            if not self._error:
+                                self._error = "batch stopped unexpectedly"
+                            self._status_text = f"Error — {self._error}"
+                            self._phase = "terminal"
                         self._async_running = False
                         self._lease_deadline = None
                         if self._phase == "running":

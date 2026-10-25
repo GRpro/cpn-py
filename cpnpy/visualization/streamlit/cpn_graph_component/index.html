@@ -548,7 +548,7 @@
                         window.parent.postMessage({
                             isStreamlitMessage: true,
                             type: "streamlit:setComponentValue",
-                            value: JSON.stringify({ type: "dismiss_status", id: id }),
+                            value: JSON.stringify({ type: "dismiss_status", id: id, nonce: Date.now() }),
                             dataType: "json",
                         }, "*");
                     } catch (e) {}

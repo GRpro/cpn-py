@@ -1745,6 +1745,14 @@ class CPNStreamlitVisualizer:
         )
         frame_height = height + 20
         raw = cpn_graph(data, height=frame_height, key=self._k("graph"))
+        # The iframe keeps returning the last value. Handling it again would
+        # request another rerun and leave the page stuck. Do not clear this
+        # key on Reset: the leftover value must stay ignored.
+        seen_key = self._k("graph_component_value")
+        if raw and raw == st.session_state.get(seen_key):
+            return
+        if raw:
+            st.session_state[seen_key] = raw
         pick, layout, dismiss_id = self._parse_graph_component_value(raw)
         if dismiss_id:
             self._dismiss_status(dismiss_id)
