@@ -1,3 +1,9 @@
 pm4py
 sympy
 jsonschema
+pyvis
+networkx
+pydot
+# test dependencies
+pytest
+streamlit

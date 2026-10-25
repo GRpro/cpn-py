@@ -23,7 +23,7 @@ def load_requirements(filename):
         ]
 
 
-install_requires = ["pm4py", "jsonschema", "simpy"]
+install_requires = ["pm4py", "jsonschema", "simpy", "pyvis", "pydot"]
 
 setup(
     name=meta["__title__"],
@@ -38,6 +38,12 @@ setup(
     packages=find_packages(exclude=["tests*", "examples*", "extra*"]),
     python_requires=">=3.6",
     install_requires=install_requires,
+    package_data={
+        "cpnpy.visualization.streamlit.cpn_graph_component": [
+            "index.html",
+            "vis-network.min.js",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",

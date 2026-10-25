@@ -66,7 +66,10 @@ class HCPNGraphViz:
 
                 # Gather tokens from marking
                 ms = marking.get_multiset(place.name)
-                token_str_list = [format_token(tok) for tok in ms.tokens]
+                timed = bool(getattr(place.colorset, "timed", False))
+                token_str_list = [
+                    format_token(tok, include_timestamp=timed) for tok in ms.tokens
+                ]
                 if token_str_list:
                     label = f"{place.name}\\nTokens: {', '.join(token_str_list)}"
                 else:
